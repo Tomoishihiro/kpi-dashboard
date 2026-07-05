@@ -1,0 +1,13 @@
+# 壁掛けタブレット向けダークテーマ(夜間の眩しさ・画面焼け対策)
+[theme]
+base = "dark"
+primaryColor = "#22C55E"
+backgroundColor = "#0B0F14"
+secondaryBackgroundColor = "#161B22"
+textColor = "#E5E7EB"
+
+[client]
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false
