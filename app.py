@@ -33,6 +33,10 @@ TOKEN = st.secrets["NOTION_TOKEN"]
 SIGNAL_COLOR = {"青": "#3B82F6", "黄": "#EAB308", "赤": "#EF4444", None: "#6B7280"}
 
 GOAL_KM = 100.0
+STRETCH_KM = 150.0  # 年間ストレッチ目標
+WEEKLY_EN_MIN = 420.0  # 英語 週目標(7時間)
+URL_LEARNING_DB = "https://app.notion.com/p/0f1cb96b58694555b6315adf5b711ea4"  # 学習記録DB
+URL_TADOKU_DB = "https://app.notion.com/p/26f6e5b9ef1080e79a20d92691202f71"    # 多読記録
 GOAL_START = dt.date(2026, 1, 1)   # 計画ライン・対計画計算の起点(年初から)
 GOAL_END = dt.date(2026, 12, 31)
 WAIST_GOAL = 76.0  # 腹囲目標 cm
@@ -526,8 +530,8 @@ def render_condition():
 
 # ================= 目標 =================
 def render_goals():
-    tab_run, tab_weight, tab_bucket = st.tabs(
-        ["🏃 ランニング 100km", "⚖️ 体重・脂質改善", "🪣 タイムバケット"])
+    tab_run, tab_weight, tab_en, tab_bucket = st.tabs(
+        ["🏃 ランニング 100km", "⚖️ 体重・脂質改善", "🇬🇧 英語", "🪣 タイムバケット"])
 
     with tab_run:
         st.markdown(linked_header("🏃 ランニング記録", URL_RUN_DB), unsafe_allow_html=True)
@@ -547,7 +551,10 @@ def render_goals():
             fig.add_trace(go.Scatter(x=cum["date"], y=cum["km"], mode="lines+markers",
                                      name="実績", line=dict(color="#22C55E", width=3)))
             fig.add_trace(go.Scatter(x=[GOAL_START, GOAL_END], y=[0, GOAL_KM], mode="lines",
-                                     name="目標ライン", line=dict(color="#6B7280", dash="dash")))
+                                     name="目標 100km", line=dict(color="#6B7280", dash="dash")))
+            fig.add_trace(go.Scatter(x=[GOAL_START, GOAL_END], y=[0, STRETCH_KM], mode="lines",
+                                     name=f"ストレッチ {STRETCH_KM:.0f}km",
+                                     line=dict(color="#EAB308", dash="dot")))
             fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10),
                               legend=dict(orientation="h", y=1.1))
             st.plotly_chart(fig, use_container_width=True)
@@ -610,6 +617,77 @@ def render_goals():
                                     use_container_width=True)
         else:
             st.info("体重の記録がありません")
+
+    with tab_en:
+        st.markdown(linked_header("🇬🇧 英語学習(週目標 7時間)", URL_LEARNING_DB),
+                    unsafe_allow_html=True)
+        TYPE_COLOR = {"リスニング": "#3B82F6", "スピーキング": "#22C55E",
+                      "ライティング": "#F97316", "Anki": "#A78BFA", "その他": "#6B7280"}
+        learn = pd.DataFrame([
+            {
+                "date": na.prop_date(p, "日付"),
+                "種別": na.prop_select(p, "種別") or "その他",
+                "分": na.prop_number(p, "時間_分") or 0.0,
+                "量": na.prop_number(p, "量"),
+                "単位": na.prop_select(p, "量単位"),
+            }
+            for p in data.get("learning", []) if na.prop_date(p, "日付")
+        ])
+        if learn.empty:
+            st.info("学習記録DBにデータが貯まるとここに表示されます"
+                    "(リスニング・スピーキング・ライティング・Anki)")
+        else:
+            learn["date"] = to_jst_date(learn["date"])
+            week_start = today - dt.timedelta(days=today.weekday())  # 月曜起点
+            this_week = learn[learn["date"] >= week_start]
+            wk_min = float(this_week["分"].sum())
+            days_left = 7 - today.weekday()
+            m1, m2, m3 = st.columns(3)
+            m1.metric("今週の合計", f"{wk_min / 60:.1f} h",
+                      f"{(wk_min - WEEKLY_EN_MIN) / 60:+.1f} h 対目標")
+            m2.metric("達成率", f"{wk_min / WEEKLY_EN_MIN * 100:.0f}%")
+            m3.metric("残り", f"{max(WEEKLY_EN_MIN - wk_min, 0) / 60:.1f} h"
+                             f"(あと{days_left}日)")
+            st.progress(min(wk_min / WEEKLY_EN_MIN, 1.0))
+
+            # 今週の種別内訳
+            if not this_week.empty:
+                parts = this_week.groupby("種別")["分"].sum()
+                st.caption("今週の内訳: " + " / ".join(
+                    f"{t} {int(v)}分" for t, v in parts.items() if v > 0))
+
+            # 週別積み上げバー(12週)
+            wk = learn.copy()
+            wk["week"] = wk["date"].map(lambda d: d - dt.timedelta(days=d.weekday()))
+            pivot = wk.pivot_table(index="week", columns="種別", values="分",
+                                   aggfunc="sum").fillna(0)
+            fig = go.Figure()
+            for t in ["リスニング", "スピーキング", "ライティング", "Anki", "その他"]:
+                if t in pivot.columns:
+                    fig.add_trace(go.Bar(x=pivot.index, y=pivot[t], name=t,
+                                         marker_color=TYPE_COLOR[t]))
+            fig.add_hline(y=WEEKLY_EN_MIN, line_dash="dash", line_color="#EAB308",
+                          annotation_text="週目標 420分")
+            fig.update_layout(barmode="stack", height=280,
+                              margin=dict(l=10, r=10, t=10, b=10),
+                              legend=dict(orientation="h", y=1.12))
+            st.plotly_chart(fig, use_container_width=True)
+
+        # 量サイド(観察指標)
+        st.markdown(f"##### 📚 量の記録(観察指標) [多読記録↗]({URL_TADOKU_DB})")
+        tadoku = [p for p in alltime.get("tadoku_all", [])]
+        done_books = [p for p in tadoku if na.prop_date(p, "読了")]
+        total_words = sum(na.prop_number(p, "文字") or 0 for p in done_books)
+        q1, q2, q3 = st.columns(3)
+        q1.metric("多読 読了", f"{len(done_books)} 冊", f"累計 {total_words:,.0f} 語")
+        if not learn.empty:
+            anki_wk = learn[(learn["種別"] == "Anki") &
+                            (learn["date"] >= today - dt.timedelta(days=7))]
+            lessons = learn[(learn["種別"] == "スピーキング") &
+                            (learn["date"] >= today - dt.timedelta(days=28))]
+            q2.metric("Anki 復習(7日)", f"{anki_wk['量'].sum():.0f} 枚")
+            q3.metric("レッスン(28日)", f"{lessons['量'].sum():.0f} 回")
+        st.caption("※ 多読は時間の記録がないため週7時間には含まれません(語数のみ管理)")
 
     with tab_bucket:
         URL_BUCKET_DB = "https://app.notion.com/p/1ca6e5b9ef1080489650cdbdb9e9cb99"

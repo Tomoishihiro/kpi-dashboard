@@ -22,6 +22,8 @@ DS_THOUGHT = "3456e5b9-ef10-80b8-a92b-000b6480cc94"    # 思考記録
 DS_TASK = "1c36e5b9-ef10-8192-9649-000b1cf955e8"       # ✅ タスク
 DS_TIMEBUCKET = "1ca6e5b9-ef10-801e-aa7e-000b73320688"  # Time Bucket
 DS_MEDITATION = "1f06e5b9-ef10-8039-b0b6-000b6fd9e5e2"  # 瞑想記録
+DS_LEARNING = "44ad34d1-65b0-4085-b20a-9504379e3408"    # 学習記録(英語+Anki)
+DS_TADOKU = "26f6e5b9-ef10-802c-bd4e-000b2ecbfa6a"      # 多読記録
 
 
 def _headers(token: str) -> dict:
@@ -135,6 +137,7 @@ def fetch_all(token: str, days: int = 30) -> dict[str, list[dict]]:
             {"property": "締め切り", "date": {"on_or_before": week_end.isoformat()}},
         ]}}),
         "timebucket": (DS_TIMEBUCKET, {}),  # 全件(件数は少ない前提)
+        "learning": (DS_LEARNING, _date_filter("日付", today - dt.timedelta(days=84))),
         "thoughts_month": (DS_THOUGHT, {"filter": {
             "timestamp": "created_time",
             "created_time": {"on_or_after": f"{today.replace(day=1).isoformat()}T00:00:00+09:00"},
@@ -166,6 +169,7 @@ def fetch_alltime(token: str) -> dict[str, list[dict]]:
         "daily_all": (DS_DAILY_LOG, {"sorts": [{"property": "日付", "direction": "ascending"}]}),
         "running_all": (DS_RUNNING, {"sorts": [{"property": "日時", "direction": "ascending"}]}),
         "meditation_all": (DS_MEDITATION, {"sorts": [{"property": "日付", "direction": "ascending"}]}),
+        "tadoku_all": (DS_TADOKU, {}),
         "tasks_30d": (DS_TASK, {"filter": {
             "timestamp": "created_time",
             "created_time": {"on_or_after": f"{since30.isoformat()}T00:00:00+09:00"},
