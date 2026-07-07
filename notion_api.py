@@ -24,6 +24,9 @@ DS_TIMEBUCKET = "1ca6e5b9-ef10-801e-aa7e-000b73320688"  # Time Bucket
 DS_MEDITATION = "1f06e5b9-ef10-8039-b0b6-000b6fd9e5e2"  # 瞑想記録
 DS_LEARNING = "44ad34d1-65b0-4085-b20a-9504379e3408"    # 学習記録(英語+Anki)
 DS_TADOKU = "26f6e5b9-ef10-802c-bd4e-000b2ecbfa6a"      # 多読記録
+DS_ACTION = "3526e5b9-ef10-800d-9067-000b606d65a1"      # アクション・問い
+DS_HANSHO = "1b6ccdbb-90e1-40e9-92b6-31286c7c506a"      # 反証体験ログ
+DS_MEAL = "c286a9de-3db6-45ee-b055-cb8c21620601"        # 🍽️ 食事記録
 
 
 def _headers(token: str) -> dict:
@@ -118,16 +121,15 @@ def fetch_all(token: str, days: int = 30) -> dict[str, list[dict]]:
     today = dt.date.today()
     since_recent = today - dt.timedelta(days=days)
     week_end = today + dt.timedelta(days=(6 - today.weekday()))  # 今週の日曜
+    week_start = today - dt.timedelta(days=today.weekday())      # 今週の月曜
     today_jst_start = f"{today.isoformat()}T00:00:00+09:00"
 
     jobs: dict[str, tuple[str, dict]] = {
         "condition": (DS_CONDITION, _date_filter("日付", since_recent)),
         "running": (DS_RUNNING, _date_filter("日時", RUNNING_SINCE)),
         "daily_log": (DS_DAILY_LOG, _date_filter("日付", since_recent)),
-        "thoughts_open": (DS_THOUGHT, {"filter": {"or": [
-            {"property": "ステータス", "select": {"equals": "未処理"}},
-            {"property": "ステータス", "select": {"equals": "再処理"}},
-        ]}}),
+        "thoughts_open": (DS_THOUGHT, {"filter": {
+            "property": "ステータス", "select": {"does_not_equal": "完了"}}}),
         "tasks_today": (DS_TASK, {"filter": {
             "timestamp": "created_time",
             "created_time": {"on_or_after": today_jst_start},
@@ -138,10 +140,21 @@ def fetch_all(token: str, days: int = 30) -> dict[str, list[dict]]:
         ]}}),
         "timebucket": (DS_TIMEBUCKET, {}),  # 全件(件数は少ない前提)
         "learning": (DS_LEARNING, _date_filter("日付", today - dt.timedelta(days=84))),
+        "meals": (DS_MEAL, _date_filter("日付", since_recent)),
         "thoughts_month": (DS_THOUGHT, {"filter": {
             "timestamp": "created_time",
             "created_time": {"on_or_after": f"{today.replace(day=1).isoformat()}T00:00:00+09:00"},
         }}),
+        "thoughts_new_week": (DS_THOUGHT, {"filter": {
+            "timestamp": "created_time",
+            "created_time": {"on_or_after": f"{week_start.isoformat()}T00:00:00+09:00"},
+        }}),
+        "thoughts_done_week": (DS_THOUGHT, {"filter": {"and": [
+            {"property": "ステータス", "select": {"equals": "完了"}},
+            {"timestamp": "last_edited_time",
+             "last_edited_time": {"on_or_after": f"{week_start.isoformat()}T00:00:00+09:00"}},
+        ]}}),
+        "actions_all": (DS_ACTION, {}),
     }
     out: dict[str, list[dict]] = {}
     errors: list[str] = []
@@ -170,6 +183,7 @@ def fetch_alltime(token: str) -> dict[str, list[dict]]:
         "running_all": (DS_RUNNING, {"sorts": [{"property": "日時", "direction": "ascending"}]}),
         "meditation_all": (DS_MEDITATION, {"sorts": [{"property": "日付", "direction": "ascending"}]}),
         "tadoku_all": (DS_TADOKU, {}),
+        "hansho_all": (DS_HANSHO, {"sorts": [{"property": "日付", "direction": "ascending"}]}),
         "tasks_30d": (DS_TASK, {"filter": {
             "timestamp": "created_time",
             "created_time": {"on_or_after": f"{since30.isoformat()}T00:00:00+09:00"},

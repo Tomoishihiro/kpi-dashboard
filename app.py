@@ -49,6 +49,7 @@ URL_THOUGHT_DB = "https://app.notion.com/p/3456e5b9ef1080e3aeaaed83ca783463"  # 
 URL_RUN_DB = "https://app.notion.com/p/b3f7d01fea0349b58bedd56d7df58fb4"      # ランニング記録DB
 URL_DAILY_DB = "https://app.notion.com/p/44f2b9e428fe48749d4b4bb5ce66e51f"    # 日次ログDB
 URL_MED_DB = "https://app.notion.com/p/1f06e5b9ef1080868d9be79a2fe00ab6"      # 瞑想記録DB
+URL_COND_DB = "https://app.notion.com/p/0c718e4a65d64b95bcc192ecb9106b70"     # コンディション記録DB
 
 
 def linked_header(title: str, url: str) -> str:
@@ -222,6 +223,23 @@ logs = pd.DataFrame([
 if not logs.empty:
     logs["date"] = to_jst_date(logs["date"])
 
+meals = pd.DataFrame([
+    {
+        "date": na.prop_date(p, "日付"),
+        "脂質": na.prop_number(p, "脂質_g"),
+        "繊維": na.prop_number(p, "食物繊維_g"),
+        "塩分": na.prop_number(p, "食塩相当量_g"),
+        "スコア": na.prop_number(p, "健康スコア"),
+        "飲酒": na.prop_checkbox(p, "飲酒"),
+        "夕食帯": na.prop_select(p, "夕食時間帯"),
+    }
+    for p in data.get("meals", []) if na.prop_date(p, "日付")
+])
+if not meals.empty:
+    meals["date"] = to_jst_date(meals["date"])
+    meals = meals.sort_values("date")
+drink_dates = set(meals[meals["飲酒"]]["date"]) if not meals.empty else set()
+
 log_dates = set(logs["date"]) if not logs.empty else set()
 stretch_dates = set(logs[logs["stretch"]]["date"]) if not logs.empty else set()
 med_dates = set(cond[cond["瞑想"]]["date"]) if not cond.empty else set()
@@ -262,6 +280,20 @@ if not _all_med_dates:  # 瞑想DB未接続時のフォールバック
 
 lifetime_km = sum(na.prop_number(p, "距離_km") or 0.0 for p in alltime["running_all"])
 
+# 反証体験ログ(再掲示プール用)
+hansho_entries = []
+for p in alltime.get("hansho_all", []):
+    d = na.prop_date(p, "日付")
+    event = na.prop_title(p, "出来事")
+    learning = na.prop_rich_text(p, "学び・再解釈").strip()
+    if d and event and learning:
+        hansho_entries.append({
+            "date": _to_date(d),
+            "event": event,
+            "learning": learning,
+            "category": na.prop_select(p, "カテゴリ") or "",
+        })
+
 # 日別タスク消化率(作成日ベース、過去30日)
 _task_daily: dict = {}
 for p in alltime.get("tasks_30d", []):
@@ -297,6 +329,24 @@ def render_today():
     sig = (latest["総合"], latest["身体疲労"], latest["自律神経"]) if is_today else (None, None, None)
     mode = today_mode(*sig)
     icon, action = MODE_RULES[mode]
+
+    # ---- 今日の記録漏れチェック ----
+    learn_dates = set()
+    for p in data.get("learning", []):
+        d = na.prop_date(p, "日付")
+        if d:
+            learn_dates.add(pd.to_datetime(d, utc=True).tz_convert("Asia/Tokyo").date())
+    missing = []
+    if not is_today:
+        missing.append(f"[コンディション]({URL_COND_DB})")
+    if today not in log_dates:
+        missing.append(f"[日次ログ]({URL_DAILY_DB})")
+    if today not in med_dates:
+        missing.append(f"[瞑想]({URL_MED_DB})")
+    if today not in learn_dates:
+        missing.append(f"[学習記録]({URL_LEARNING_DB})")
+    if missing:
+        st.caption("✍️ 今日まだ: " + " ・ ".join(missing))
 
     c1, c2, c3, c4 = st.columns([1, 1, 1, 2.2])
     c1.markdown(signal_badge("総合", sig[0]), unsafe_allow_html=True)
@@ -393,17 +443,47 @@ def render_today():
     with b3:
         st.markdown(linked_header("💭 思考在庫", URL_THOUGHT_DB), unsafe_allow_html=True)
         n_thoughts = len(data["thoughts_open"])
-        st.metric("未処理+再処理", f"{n_thoughts} 件")
+        n_new_wk = len(data.get("thoughts_new_week", []))
+        n_done_wk = len(data.get("thoughts_done_week", []))
+        st.metric("在庫(完了以外)", f"{n_thoughts} 件",
+                  f"今週 +{n_new_wk} / ✓{n_done_wk}", delta_color="off")
+
         month = data.get("thoughts_month", [])
-        DONE_STATUS = {"処理済", "アクション化済", "プロジェクト化", "完了"}
         n_month = len(month)
-        n_done = sum(1 for t in month if na.prop_select(t, "ステータス") in DONE_STATUS)
+        n_done_m = sum(1 for t in month
+                       if na.prop_select(t, "ステータス") == "完了")
         if n_month:
-            st.caption(f"今月: {n_month} 件起票 / {n_done} 件完了 ({n_done / n_month * 100:.0f}%)")
-        else:
-            st.caption(f"今月({today.month}月)の起票はまだありません")
-        if n_thoughts >= 10:
-            st.caption("週次レビューで棚卸し推奨")
+            st.caption(f"今月: {n_month} 件起票 / {n_done_m} 件完了")
+
+        # アクション・問い(完了 = アーカイブ or タスク化 or 回答済み)
+        acts = data.get("actions_all", [])
+        def _act_done(p):
+            return (na.prop_checkbox(p, "アーカイブ")
+                    or na.prop_has_relation(p, "タスク化先")
+                    or bool(na.prop_rich_text(p, "回答").strip()))
+        open_acts = [p for p in acts if not _act_done(p)]
+        n_act_done = len(acts) - len(open_acts)
+        st.metric("アクション・問い 残", f"{len(open_acts)} 件",
+                  f"完了 {n_act_done} 件", delta_color="off")
+
+        # エイジング: 残アイテムの滞留日数(createdTimeから算出)
+        ages = sorted(
+            (today - _to_date(p["created_time"])).days
+            for p in open_acts if p.get("created_time"))
+        th_ages = sorted(
+            (today - _to_date(p["created_time"])).days
+            for p in data["thoughts_open"] if p.get("created_time"))
+        if ages or th_ages:
+            def _med(xs): return xs[len(xs) // 2] if xs else 0
+            parts = []
+            if ages:
+                parts.append(f"ア・問: 最古{ages[-1]}日 / 中央{_med(ages)}日")
+            if th_ages:
+                parts.append(f"思考: 最古{th_ages[-1]}日 / 中央{_med(th_ages)}日")
+            stale = sum(1 for a in ages if a >= 30) + sum(1 for a in th_ages if a >= 30)
+            st.caption("⏳ 滞留 — " + " ・ ".join(parts))
+            if stale:
+                st.caption(f"🕰️ 30日以上動いていないもの {stale} 件 → 週次レビューで棚卸しを")
 
     st.divider()
     st.markdown("#### 🌱 成長")
@@ -440,20 +520,40 @@ def render_today():
             st.caption("比較にはもう少しデータの蓄積が必要です")
 
     with g_right:
-        st.caption("あの日の成長(過去90日からランダム)")
+        st.caption("あの日の自分から(成長ログ+反証体験)")
         import random
-        pool = [(d, t) for d, t in growth_entries if d >= today - dt.timedelta(days=90)]
+        pool = [("growth", d, t) for d, t in growth_entries
+                if d >= today - dt.timedelta(days=90)]
+        pool += [("hansho", h["date"], h) for h in hansho_entries]  # 反証は全期間
         if pool:
-            d, text = random.Random(today.toordinal()).choice(pool)
-            st.markdown(
-                f"<div style='padding:0.8rem 1rem;border-radius:12px;background:#161B22;"
-                f"border-left:4px solid #22C55E'>"
-                f"<div style='color:#9CA3AF;font-size:0.75rem'>{d} ({(today - d).days}日前)</div>"
-                f"<div style='font-size:1.05rem;margin-top:0.2rem'>{text}</div></div>",
-                unsafe_allow_html=True,
-            )
+            kind, d, item = random.Random(today.toordinal()).choice(pool)
+            days_ago = (today - d).days
+            if kind == "growth":
+                st.markdown(
+                    f"<div style='padding:0.8rem 1rem;border-radius:12px;background:#161B22;"
+                    f"border-left:4px solid #22C55E'>"
+                    f"<div style='color:#9CA3AF;font-size:0.75rem'>"
+                    f"🌱 成長 — {d} ({days_ago}日前)</div>"
+                    f"<div style='font-size:1.05rem;margin-top:0.2rem'>{item}</div></div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                cat = f"「{item['category']}」" if item["category"] else ""
+                learning = item["learning"]
+                if len(learning) > 150:
+                    learning = learning[:150] + "…"
+                st.markdown(
+                    f"<div style='padding:0.8rem 1rem;border-radius:12px;background:#161B22;"
+                    f"border-left:4px solid #A78BFA'>"
+                    f"<div style='color:#9CA3AF;font-size:0.75rem'>"
+                    f"🛡️ 反証体験{cat} — {d} ({days_ago}日前)</div>"
+                    f"<div style='font-weight:600;margin-top:0.2rem'>{item['event']}</div>"
+                    f"<div style='color:#D1D5DB;font-size:0.9rem;margin-top:0.2rem'>"
+                    f"{learning}</div></div>",
+                    unsafe_allow_html=True,
+                )
         else:
-            st.info("「今日成長したこと」の記入が貯まると、ここに再登場します")
+            st.info("成長ログ・反証体験の記入が貯まると、ここに再登場します")
 
 
 # ================= コンディション詳細 =================
@@ -526,6 +626,84 @@ def render_condition():
         fig.add_hline(y=0.5, line_dash="dash", line_color="#EF4444",
                       annotation_text="発熱傾向 +0.5℃")
         st.plotly_chart(fig, use_container_width=True)
+
+    # ---- 飲酒・夕食時間帯と翌朝の回復 ----
+    st.divider()
+    st.markdown("#### 🍽️ 食事と翌朝の回復(30日)")
+    # 翌朝指標: 記録日Dの値は前夜の結果 → 前日dに紐づける
+    next_hrv = {r["date"] - dt.timedelta(days=1): r["HRV"]
+                for _, r in cond.iterrows() if pd.notna(r["HRV"])}
+    next_sleep = {r["date"] - dt.timedelta(days=1): r["睡眠スコア"]
+                  for _, r in cond.iterrows() if pd.notna(r["睡眠スコア"])}
+    next_bb = {r["date"] - dt.timedelta(days=1): r["BB起床"]
+               for _, r in cond.iterrows() if pd.notna(r["BB起床"])}
+
+    if not meals.empty:
+        c_alc, c_din = st.columns(2)
+        with c_alc:
+            st.caption("🍺 飲酒と翌朝")
+            alc_days = [d for d in meals["date"] if d in drink_dates]
+            sober_days = [d for d in meals["date"] if d not in drink_dates]
+            rows = []
+            for label, metric_map in [("HRV", next_hrv), ("睡眠スコア", next_sleep)]:
+                a = [metric_map[d] for d in alc_days if d in metric_map]
+                s = [metric_map[d] for d in sober_days if d in metric_map]
+                if len(a) >= 2 and len(s) >= 3:
+                    rows.append((label, sum(a) / len(a), sum(s) / len(s), len(a)))
+            if rows:
+                for label, a_avg, s_avg, n in rows:
+                    st.metric(f"翌朝{label}: 飲酒日 (n={n})", f"{a_avg:.0f}",
+                              f"{a_avg - s_avg:+.1f} vs 非飲酒日", delta_color="off")
+            else:
+                st.info("飲酒日のデータが貯まると比較が出ます")
+        with c_din:
+            st.caption("🕰️ 夕食時間帯と翌朝")
+            rows = []
+            for band in ["早い(〜19時)", "標準(19-21時)", "遅い(21時〜)"]:
+                days = list(meals[meals["夕食帯"] == band]["date"])
+                sl = [next_sleep[d] for d in days if d in next_sleep]
+                bb = [next_bb[d] for d in days if d in next_bb]
+                if sl or bb:
+                    rows.append((band,
+                                 sum(sl) / len(sl) if sl else None,
+                                 sum(bb) / len(bb) if bb else None,
+                                 max(len(sl), len(bb))))
+            if rows:
+                df = pd.DataFrame(
+                    [(b, f"{s:.0f}" if s else "—", f"{v:.0f}" if v else "—", n)
+                     for b, s, v, n in rows],
+                    columns=["夕食時間帯", "翌朝睡眠スコア", "翌朝BB", "n"])
+                st.dataframe(df, hide_index=True, use_container_width=True)
+            else:
+                st.info("夕食時間帯の記録が貯まると比較が出ます")
+        st.caption("※ 相関の観察。会食日は飲酒・遅い夕食・外食が重なりやすい点に注意")
+
+    # ---- 信号別タスク消化率(モード運用の監査) ----
+    st.divider()
+    st.markdown("#### 🚥 信号別タスク消化率(30日)")
+    st.caption("モードルールが機能しているかの監査。"
+               "赤の日に低いのは設計通りの休養、青の日まで低ければ別の問題。")
+    sig_by_day = {r["date"]: r["総合"] for _, r in cond.iterrows() if r["総合"]}
+    rows = []
+    for color in ["青", "黄", "赤"]:
+        rates = [task_rate_by_day[d] for d, s in sig_by_day.items()
+                 if s == color and d in task_rate_by_day]
+        if rates:
+            rows.append((color, sum(rates) / len(rates) * 100, len(rates)))
+    if rows:
+        cols = st.columns(3)
+        for c, (color, avg, n) in zip(cols, rows):
+            c.metric(f"{'🔵' if color == '青' else '🟡' if color == '黄' else '🔴'} "
+                     f"{color}の日 (n={n})", f"{avg:.0f}%")
+        fig = go.Figure(go.Bar(
+            x=[r[0] for r in rows], y=[r[1] for r in rows],
+            marker_color=[SIGNAL_COLOR[r[0]] for r in rows],
+            text=[f"{r[1]:.0f}%" for r in rows], textposition="outside"))
+        fig.update_layout(height=240, margin=dict(l=10, r=10, t=20, b=10),
+                          yaxis=dict(range=[0, 110], title="平均消化率 %"))
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("信号とタスクの両方が揃った日が貯まると表示されます")
 
 
 # ================= 目標 =================
@@ -615,6 +793,39 @@ def render_goals():
                     st.caption("骨格筋量 (kg)")
                     st.plotly_chart(line_fig(mus, {"骨格筋量": "#3B82F6"}, height=220),
                                     use_container_width=True)
+
+            # ---- 食事: LDL対策の先行指標 ----
+            if not meals.empty:
+                st.divider()
+                st.markdown("##### 🥗 食事(LDL対策の先行指標・7日平均)")
+                half = today - dt.timedelta(days=7)
+                cols = st.columns(4)
+                for c, (name, unit, good_down) in zip(cols, [
+                        ("脂質", "g/日", True), ("繊維", "g/日", False),
+                        ("塩分", "g/日", True)]):
+                    recent = meals[meals["date"] > half][name].dropna()
+                    prev = meals[(meals["date"] <= half)][name].dropna()
+                    if len(recent) >= 3:
+                        d_txt = None
+                        if len(prev) >= 3:
+                            diff = recent.mean() - prev.mean()
+                            d_txt = f"{diff:+.1f} 前週比"
+                        c.metric(f"{name} ({unit})", f"{recent.mean():.1f}", d_txt,
+                                 delta_color="inverse" if good_down else "normal")
+                sc = meals.dropna(subset=["スコア"])
+                if not sc.empty:
+                    cols[3].metric("健康スコア(7日)",
+                                   f"{sc[sc['date'] > half]['スコア'].mean():.0f}"
+                                   if len(sc[sc["date"] > half]) else "—")
+                trend = meals.dropna(subset=["脂質", "繊維"]).copy()
+                if len(trend) >= 7:
+                    trend["脂質(7日平均)"] = trend["脂質"].rolling(7, min_periods=3).mean()
+                    trend["繊維(7日平均)"] = trend["繊維"].rolling(7, min_periods=3).mean()
+                    st.plotly_chart(
+                        line_fig(trend, {"脂質(7日平均)": "#F97316",
+                                         "繊維(7日平均)": "#22C55E"}, height=220),
+                        use_container_width=True)
+                    st.caption("狙い: 🟠脂質は下へ、🟢繊維は上へ(医師方針の実行度)")
         else:
             st.info("体重の記録がありません")
 
@@ -673,21 +884,72 @@ def render_goals():
                               legend=dict(orientation="h", y=1.12))
             st.plotly_chart(fig, use_container_width=True)
 
-        # 量サイド(観察指標)
-        st.markdown(f"##### 📚 量の記録(観察指標) [多読記録↗]({URL_TADOKU_DB})")
-        tadoku = [p for p in alltime.get("tadoku_all", [])]
-        done_books = [p for p in tadoku if na.prop_date(p, "読了")]
-        total_words = sum(na.prop_number(p, "文字") or 0 for p in done_books)
-        q1, q2, q3 = st.columns(3)
-        q1.metric("多読 読了", f"{len(done_books)} 冊", f"累計 {total_words:,.0f} 語")
+        # ---- 多読: 累計語数(KPI) ----
+        st.markdown(f"##### 📚 多読 累計語数 [多読記録↗]({URL_TADOKU_DB})")
+        books = pd.DataFrame([
+            {
+                "date": na.prop_date(p, "読了"),
+                "words": na.prop_number(p, "文字") or 0,
+                "name": na.prop_title(p, "名前"),
+                "level": na.prop_select(p, "レベル") or "",
+                "comment": na.prop_rich_text(p, "感想"),
+            }
+            for p in alltime.get("tadoku_all", []) if na.prop_date(p, "読了")
+        ])
+        if books.empty:
+            st.info("読了した本が記録されるとここに累計語数が積み上がります")
+        else:
+            books["date"] = to_jst_date(books["date"])
+            books = books.sort_values("date").reset_index(drop=True)
+            books["cum"] = books["words"].cumsum()
+
+            q1, q2 = st.columns(2)
+            q1.metric("読了", f"{len(books)} 冊")
+            q2.metric("累計語数", f"{books['cum'].iloc[-1]:,.0f} 語")
+
+            def _wrap(text: str, limit: int = 90) -> str:
+                text = (text or "").replace("\n", " ")
+                return text[:limit] + "…" if len(text) > limit else (text or "(感想なし)")
+
+            hover = [
+                f"<b>{r['name']}</b> ({r['level']})<br>"
+                f"{r['date']} 読了 / {r['words']:,.0f} 語<br>"
+                f"累計 {r['cum']:,.0f} 語<br>"
+                f"<i>💬 {_wrap(r['comment'])}</i>"
+                for _, r in books.iterrows()
+            ]
+            fig = go.Figure(go.Scatter(
+                x=books["date"], y=books["cum"], mode="lines+markers",
+                line=dict(color="#F97316", width=3),
+                marker=dict(size=10, color="#F97316",
+                            line=dict(color="#fff", width=1)),
+                hovertext=hover, hoverinfo="text"))
+            fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10),
+                              yaxis_title="累計語数")
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption("点にタッチ/ホバーすると、その本の感想が読めます")
+
+            # 直近の1冊の感想を常時表示(成長ログと同じ再掲示の思想)
+            last = books.iloc[-1]
+            if last["comment"]:
+                st.markdown(
+                    f"<div style='padding:0.7rem 1rem;border-radius:12px;background:#161B22;"
+                    f"border-left:4px solid #F97316'>"
+                    f"<div style='color:#9CA3AF;font-size:0.75rem'>"
+                    f"直近の読了: {last['name']} ({last['date']})</div>"
+                    f"<div style='margin-top:0.2rem'>{last['comment']}</div></div>",
+                    unsafe_allow_html=True)
+
+        # ---- その他の量(観察指標) ----
         if not learn.empty:
             anki_wk = learn[(learn["種別"] == "Anki") &
                             (learn["date"] >= today - dt.timedelta(days=7))]
             lessons = learn[(learn["種別"] == "スピーキング") &
                             (learn["date"] >= today - dt.timedelta(days=28))]
-            q2.metric("Anki 復習(7日)", f"{anki_wk['量'].sum():.0f} 枚")
-            q3.metric("レッスン(28日)", f"{lessons['量'].sum():.0f} 回")
-        st.caption("※ 多読は時間の記録がないため週7時間には含まれません(語数のみ管理)")
+            q1, q2, _sp = st.columns(3)
+            q1.metric("Anki 復習(7日)", f"{anki_wk['量'].sum():.0f} 枚")
+            q2.metric("レッスン(28日)", f"{lessons['量'].sum():.0f} 回")
+        st.caption("※ 多読は時間の記録がないため週7時間には含まれません(語数で管理)")
 
     with tab_bucket:
         URL_BUCKET_DB = "https://app.notion.com/p/1ca6e5b9ef1080489650cdbdb9e9cb99"
@@ -866,6 +1128,9 @@ def render_habits():
             st.caption("瞑想した日の「翌朝」の夜間HRVと比較(高いほど回復)")
             hrv_next = {r["date"] - dt.timedelta(days=1): r["HRV"]
                         for _, r in cond.iterrows() if pd.notna(r["HRV"])}
+            if drink_dates and st.checkbox("🍺 飲酒日を除外(交絡除去)", value=True,
+                                           key="hrv_ex_alc"):
+                hrv_next = {d: v for d, v in hrv_next.items() if d not in drink_dates}
             compare_by_meditation(hrv_next, "翌朝の夜間HRV", unit=" ms",
                                   good_down=False, chart_color="#22C55E")
 
