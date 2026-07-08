@@ -120,6 +120,16 @@ def fmt_pace(sec: float) -> str:
     return f"{int(sec // 60)}'{int(sec % 60):02d}\""
 
 
+def parse_wake_min(text: str):
+    """'6:45' / '06:45' / '6時45分' → 深夜0時からの分。失敗時 None。"""
+    import re
+    m = re.search(r"(\d{1,2})[:時](\d{1,2})", text or "")
+    if not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2))
+    return h * 60 + mi if 0 <= h < 24 and 0 <= mi < 60 else None
+
+
 def to_jst_date(series: pd.Series) -> pd.Series:
     ts = pd.to_datetime(series, format="mixed", utc=True)
     return ts.dt.tz_convert("Asia/Tokyo").dt.date
@@ -199,6 +209,7 @@ cond = pd.DataFrame([
         "疲労度": na.prop_number(p, "主観的疲労度"),
         "幸福度": na.prop_number(p, "主観的幸福度"),
         "瞑想": na.prop_has_relation(p, "瞑想記録"),
+        "起床": na.prop_rich_text(p, "起床時刻"),
         "フィードバック": na.prop_rich_text(p, "フィードバック"),
     }
     for p in data["condition"]
@@ -311,6 +322,7 @@ for p in alltime.get("tasks_30d", []):
     is_done = na.prop_status(p, "ステータス") not in TASK_OPEN
     _task_daily[d] = (tot + 1, done + (1 if is_done else 0))
 task_rate_by_day = {d: done / tot for d, (tot, done) in _task_daily.items() if tot > 0}
+task_done_by_day = {d: done for d, (tot, done) in _task_daily.items() if tot > 0}
 
 # 瞑想実施の判定は瞑想記録DBの日付を正とする(コンディションのリレーション非依存)
 if _all_med_dates:
@@ -689,6 +701,79 @@ def render_condition():
             else:
                 st.info("夕食時間帯の記録が貯まると比較が出ます")
         st.caption("※ 相関の観察。会食日は飲酒・遅い夕食・外食が重なりやすい点に注意")
+
+    # ---- 運動・睡眠・起床とタスク処理 ----
+    st.divider()
+    st.markdown("#### 🏃💤 運動・睡眠とタスク処理(30日)")
+    st.caption("タスク処理は 消化率(質) と 完了数(量) の2軸で評価")
+
+    def _avg(xs):
+        return sum(xs) / len(xs) if xs else None
+
+    def _task_pair(days: list) -> tuple:
+        rates = [task_rate_by_day[d] * 100 for d in days if d in task_rate_by_day]
+        dones = [task_done_by_day[d] for d in days if d in task_done_by_day]
+        return _avg(rates), _avg(dones), len(rates)
+
+    p1, p2 = st.columns(2)
+    with p1:
+        st.caption("🏃 ランニング実施日(当日)")
+        run30 = {d for d in (runs["date"] if not runs.empty else [])
+                 if d >= today - dt.timedelta(days=30)}
+        task_days = sorted(task_rate_by_day.keys())
+        r_rate, r_done, r_n = _task_pair([d for d in task_days if d in run30])
+        n_rate, n_done, n_n = _task_pair([d for d in task_days if d not in run30])
+        if r_n >= 2 and n_n >= 3:
+            st.metric(f"ラン日の消化率 (n={r_n})", f"{r_rate:.0f}%",
+                      f"{r_rate - n_rate:+.0f}pt vs 非ラン日", delta_color="off")
+            st.metric("ラン日の完了数/日", f"{r_done:.1f} 件",
+                      f"{r_done - n_done:+.1f} vs 非ラン日", delta_color="off")
+        else:
+            st.info("ラン実施日のデータ蓄積待ちです")
+
+    with p2:
+        st.caption("💤 前夜の睡眠時間別(その日のタスク)")
+        sl = cond.dropna(subset=["睡眠時間"]) if not cond.empty else pd.DataFrame()
+        if not sl.empty:
+            rows = []
+            for label, lo, hi in [("6h未満", 0, 360), ("6〜7h", 360, 420),
+                                   ("7h以上", 420, 10_000)]:
+                days = [r["date"] for _, r in sl.iterrows()
+                        if lo <= r["睡眠時間"] < hi]
+                rate, done, n = _task_pair(days)
+                if n:
+                    rows.append((label, f"{rate:.0f}%", f"{done:.1f}件", n))
+            if rows:
+                st.dataframe(pd.DataFrame(rows,
+                             columns=["睡眠", "消化率", "完了数/日", "n"]),
+                             hide_index=True, use_container_width=True)
+        else:
+            st.info("睡眠時間のデータ蓄積待ちです")
+
+    # 起床時刻(プロパティと記録がある場合のみ)
+    wake = pd.DataFrame()
+    if not cond.empty and "起床" in cond.columns:
+        w = cond.copy()
+        w["wake_min"] = w["起床"].map(parse_wake_min)
+        wake = w.dropna(subset=["wake_min"])
+    if not wake.empty:
+        st.caption("🌅 起床時刻別(その日のタスク)")
+        rows = []
+        for label, lo, hi in [("6時前", 0, 360), ("6〜7時", 360, 420),
+                               ("7時以降", 420, 1440)]:
+            days = [r["date"] for _, r in wake.iterrows()
+                    if lo <= r["wake_min"] < hi]
+            rate, done, n = _task_pair(days)
+            if n:
+                rows.append((label, f"{rate:.0f}%", f"{done:.1f}件", n))
+        if rows:
+            st.dataframe(pd.DataFrame(rows,
+                         columns=["起床", "消化率", "完了数/日", "n"]),
+                         hide_index=True, use_container_width=True)
+    else:
+        st.caption("🌅 起床時刻の分析は、コンディション記録に「起床時刻」"
+                   "プロパティ(テキスト、例 6:45)を追加して記録を始めると表示されます")
+    st.caption("※ いずれも相関の観察(忙しい日はタスクが多く消化率が下がる等、母数の影響に注意)")
 
     # ---- 信号別タスク消化率(モード運用の監査) ----
     st.divider()
