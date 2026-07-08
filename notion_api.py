@@ -123,7 +123,6 @@ def fetch_all(token: str, days: int = 30) -> dict[str, list[dict]]:
     since_recent = today - dt.timedelta(days=days)
     week_end = today + dt.timedelta(days=(6 - today.weekday()))  # 今週の日曜
     week_start = today - dt.timedelta(days=today.weekday())      # 今週の月曜
-    today_jst_start = f"{today.isoformat()}T00:00:00+09:00"
 
     jobs: dict[str, tuple[str, dict]] = {
         "condition": (DS_CONDITION, _date_filter("日付", since_recent)),
@@ -132,8 +131,8 @@ def fetch_all(token: str, days: int = 30) -> dict[str, list[dict]]:
         "thoughts_open": (DS_THOUGHT, {"filter": {
             "property": "ステータス", "select": {"does_not_equal": "完了"}}}),
         "tasks_today": (DS_TASK, {"filter": {
-            "timestamp": "created_time",
-            "created_time": {"on_or_after": today_jst_start},
+            "property": "実行日時",
+            "date": {"equals": today.isoformat()},
         }}),
         "tasks_must_due": (DS_TASK, {"filter": {"and": [
             {"property": "優先度", "select": {"equals": "Must"}},
@@ -186,8 +185,8 @@ def fetch_alltime(token: str) -> dict[str, list[dict]]:
         "tadoku_all": (DS_TADOKU, {}),
         "hansho_all": (DS_HANSHO, {"sorts": [{"property": "日付", "direction": "ascending"}]}),
         "tasks_30d": (DS_TASK, {"filter": {
-            "timestamp": "created_time",
-            "created_time": {"on_or_after": f"{since30.isoformat()}T00:00:00+09:00"},
+            "property": "実行日時",
+            "date": {"on_or_after": since30.isoformat()},
         }}),
     }
     out: dict[str, list[dict]] = {}

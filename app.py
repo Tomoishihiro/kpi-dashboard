@@ -300,13 +300,13 @@ for p in alltime.get("hansho_all", []):
             "category": na.prop_select(p, "カテゴリ") or "",
         })
 
-# 日別タスク消化率(作成日ベース、過去30日)
+# 日別タスク消化率(実行日時ベース、過去30日)
 _task_daily: dict = {}
 for p in alltime.get("tasks_30d", []):
-    created = p.get("created_time")
-    if not created:
+    exec_date = na.prop_date(p, "実行日時")
+    if not exec_date:
         continue
-    d = _to_date(created)
+    d = _to_date(exec_date)
     tot, done = _task_daily.get(d, (0, 0))
     is_done = na.prop_status(p, "ステータス") not in TASK_OPEN
     _task_daily[d] = (tot + 1, done + (1 if is_done else 0))
