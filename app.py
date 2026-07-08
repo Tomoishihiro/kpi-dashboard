@@ -30,6 +30,7 @@ except ImportError:
 
 TOKEN = st.secrets["NOTION_TOKEN"]
 
+JST = dt.timezone(dt.timedelta(hours=9))
 SIGNAL_COLOR = {"青": "#3B82F6", "黄": "#EAB308", "赤": "#EF4444", None: "#6B7280"}
 
 GOAL_KM = 100.0
@@ -84,13 +85,17 @@ def today_mode(total, body, ans) -> str:
 
 @st.cache_data(ttl=300, show_spinner="Notionから取得中…")
 def load_data(days: int = 35) -> dict:
-    return na.fetch_all(TOKEN, days=days)
+    d = na.fetch_all(TOKEN, days=days)
+    d["_synced_at"] = dt.datetime.now(JST)
+    return d
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_alltime() -> dict:
     """通算・最長・成長ログ用の全期間データ(1時間キャッシュ)。"""
-    return na.fetch_alltime(TOKEN)
+    d = na.fetch_alltime(TOKEN)
+    d["_synced_at"] = dt.datetime.now(JST)
+    return d
 
 
 def longest_streak(dates: set) -> int:
@@ -165,7 +170,7 @@ def line_fig(df: pd.DataFrame, cols: dict[str, str], height=240) -> go.Figure:
 
 # ==== データ取得・整形 ====
 data = load_data()
-today = dt.date.today()
+today = dt.datetime.now(JST).date()  # サーバーはUTCのため必ずJSTで日付判定
 
 _errs = list(data.get("_errors", [])) + list(load_alltime().get("_errors", []))
 if _errs:
@@ -242,6 +247,7 @@ drink_dates = set(meals[meals["飲酒"]]["date"]) if not meals.empty else set()
 
 log_dates = set(logs["date"]) if not logs.empty else set()
 stretch_dates = set(logs[logs["stretch"]]["date"]) if not logs.empty else set()
+# 瞑想実施日は後段の瞑想DB(_all_med_dates)を正とする。ここでは暫定。
 med_dates = set(cond[cond["瞑想"]]["date"]) if not cond.empty else set()
 
 # ==== 全期間データ(通算・最長・成長ログ) ====
@@ -306,6 +312,10 @@ for p in alltime.get("tasks_30d", []):
     _task_daily[d] = (tot + 1, done + (1 if is_done else 0))
 task_rate_by_day = {d: done / tot for d, (tot, done) in _task_daily.items() if tot > 0}
 
+# 瞑想実施の判定は瞑想記録DBの日付を正とする(コンディションのリレーション非依存)
+if _all_med_dates:
+    med_dates = _all_med_dates
+
 TOTALS = {
     "log": (len(_all_log_dates), longest_streak(_all_log_dates)),
     "med": (len(_all_med_dates), longest_streak(_all_med_dates)),
@@ -314,8 +324,10 @@ TOTALS = {
 
 # ==== ナビ(自動リロードしても選択ページを維持) ====
 head_l, head_r = st.columns([1.2, 2])
+_sync = data.get("_synced_at")
+_sync_txt = f" ・ 同期 {_sync.strftime('%H:%M')}" if _sync else ""
 head_l.markdown(
-    f"## 🎯 KPI <span style='font-size:0.9rem;color:#9CA3AF'>{today}</span>",
+    f"## 🎯 KPI <span style='font-size:0.9rem;color:#9CA3AF'>{today}{_sync_txt}</span>",
     unsafe_allow_html=True,
 )
 page = head_r.radio("page", ["今日", "コンディション", "目標", "習慣"],
@@ -1164,4 +1176,10 @@ PAGES = {"今日": render_today, "コンディション": render_condition,
          "目標": render_goals, "習慣": render_habits}
 PAGES[page]()
 
-st.caption("データ: Notion API / キャッシュ・自動リロード 5分")
+_sync_all = alltime.get("_synced_at")
+footer = "データ: Notion API / 自動リロード5分"
+if _sync:
+    footer += f" / 直近データ同期 {_sync.strftime('%m/%d %H:%M')}"
+if _sync_all:
+    footer += f" / 全期間データ同期 {_sync_all.strftime('%m/%d %H:%M')}(1時間毎)"
+st.caption(footer)

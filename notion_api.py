@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 
 NOTION_VERSION = "2025-09-03"
+JST = dt.timezone(dt.timedelta(hours=9))
 BASE_URL = "https://api.notion.com/v1"
 
 # ==== データソースID(確定値) ====
@@ -118,7 +119,7 @@ def fetch_all(token: str, days: int = 30) -> dict[str, list[dict]]:
     thoughts: ステータスが 未処理 or 再処理 のもの(在庫)
     tasks: 今日生成分 + 今週期限のMust
     """
-    today = dt.date.today()
+    today = dt.datetime.now(JST).date()  # UTCサーバー対策
     since_recent = today - dt.timedelta(days=days)
     week_end = today + dt.timedelta(days=(6 - today.weekday()))  # 今週の日曜
     week_start = today - dt.timedelta(days=today.weekday())      # 今週の月曜
@@ -176,7 +177,7 @@ def fetch_alltime(token: str) -> dict[str, list[dict]]:
 
     呼び出し側で長め(1時間)にキャッシュする前提。
     """
-    since30 = dt.date.today() - dt.timedelta(days=30)
+    since30 = dt.datetime.now(JST).date() - dt.timedelta(days=30)
     jobs = {
         "condition_all": (DS_CONDITION, {"sorts": [{"property": "日付", "direction": "ascending"}]}),
         "daily_all": (DS_DAILY_LOG, {"sorts": [{"property": "日付", "direction": "ascending"}]}),
