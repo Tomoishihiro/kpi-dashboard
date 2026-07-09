@@ -322,6 +322,36 @@ for p in alltime.get("tasks_30d", []):
     is_done = na.prop_status(p, "ステータス") not in TASK_OPEN
     _task_daily[d] = (tot + 1, done + (1 if is_done else 0))
 task_rate_by_day = {d: done / tot for d, (tot, done) in _task_daily.items() if tot > 0}
+
+# 成長タブ用: 全期間のコンディション/ラン
+cond_all = pd.DataFrame([
+    {
+        "date": na.prop_date(p, "日付"),
+        "RHR": na.prop_number(p, "RHR_bpm"),
+        "HRV": na.prop_number(p, "夜間HRV_ms"),
+        "睡眠スコア": na.prop_number(p, "睡眠スコア"),
+        "体重": na.prop_number(p, "体重_kg"),
+        "体脂肪率": na.prop_number(p, "体脂肪率"),
+        "骨格筋量": na.prop_number(p, "骨格筋量_kg"),
+    }
+    for p in alltime.get("condition_all", []) if na.prop_date(p, "日付")
+])
+if not cond_all.empty:
+    cond_all["date"] = cond_all["date"].map(_to_date)
+    cond_all = cond_all.sort_values("date")
+
+runs_all = pd.DataFrame([
+    {"date": na.prop_date(p, "日時"),
+     "km": na.prop_number(p, "距離_km") or 0.0,
+     "pace_sec": None}
+    for p in alltime.get("running_all", []) if na.prop_date(p, "日時")
+])
+if not runs_all.empty:
+    runs_all["date"] = runs_all["date"].map(_to_date)
+    runs_all["pace_sec"] = [parse_pace_sec(na.prop_rich_text(p, "平均ペース"))
+                            for p in alltime.get("running_all", [])
+                            if na.prop_date(p, "日時")]
+    runs_all = runs_all.sort_values("date")
 task_done_by_day = {d: done for d, (tot, done) in _task_daily.items() if tot > 0}
 
 # 瞑想実施の判定は瞑想記録DBの日付を正とする(コンディションのリレーション非依存)
@@ -342,7 +372,7 @@ head_l.markdown(
     f"## 🎯 KPI <span style='font-size:0.9rem;color:#9CA3AF'>{today}{_sync_txt}</span>",
     unsafe_allow_html=True,
 )
-page = head_r.radio("page", ["今日", "コンディション", "目標", "習慣"],
+page = head_r.radio("page", ["今日", "コンディション", "目標", "習慣", "成長"],
                     horizontal=True, key="nav", label_visibility="collapsed")
 
 
@@ -510,74 +540,39 @@ def render_today():
                 st.caption(f"🕰️ 30日以上動いていないもの {stale} 件 → 週次レビューで棚卸しを")
 
     st.divider()
-    st.markdown("#### 🌱 成長")
-    g_left, g_right = st.columns([1.6, 1])
-
-    with g_left:
-        st.caption("30日前の自分と比べて(直近15日平均 vs その前15日平均)")
-        half = today - dt.timedelta(days=15)
-        chips = []
-        if not cond.empty:
-            for name, unit, good_down in [("RHR", "bpm", True), ("HRV", "ms", False),
-                                           ("睡眠スコア", "", False), ("体重", "kg", True),
-                                           ("体脂肪率", "%", True), ("骨格筋量", "kg", False)]:
-                recent = cond[cond["date"] > half][name].dropna()
-                prev = cond[cond["date"] <= half][name].dropna()
-                if len(recent) >= 3 and len(prev) >= 3:
-                    diff = recent.mean() - prev.mean()
-                    improved = (diff < 0) if good_down else (diff > 0)
-                    chips.append((name, f"{diff:+.1f} {unit}".strip(), improved))
-        if not runs.empty:
-            paces = runs.assign(sec=runs["ペース"].map(parse_pace_sec)).dropna(subset=["sec"])
-            if len(paces) >= 6:
-                recent_p, prev_p = paces["sec"].iloc[-5:].mean(), paces["sec"].iloc[-10:-5].mean()
-                diff = recent_p - prev_p
-                chips.append(("平均ペース(5本)", f"{'+' if diff >= 0 else '−'}{fmt_pace(abs(diff))}/km", diff < 0))
-        chips.append(("生涯走行(記録上)", f"{lifetime_km:.0f} km", None))
-        if chips:
-            for i in range(0, len(chips), 4):
-                cols = st.columns(4)
-                for c, (name, val, improved) in zip(cols, chips[i:i + 4]):
-                    mark = "" if improved is None else (" ✨" if improved else "")
-                    c.metric(name, val + mark)
+    st.markdown("#### 🌱 あの日の自分から")
+    import random
+    pool = [("growth", d, t) for d, t in growth_entries
+            if d >= today - dt.timedelta(days=90)]
+    pool += [("hansho", h["date"], h) for h in hansho_entries]  # 反証は全期間
+    if pool:
+        kind, d, item = random.Random(today.toordinal()).choice(pool)
+        days_ago = (today - d).days
+        if kind == "growth":
+            st.markdown(
+                f"<div style='padding:0.8rem 1rem;border-radius:12px;background:#161B22;"
+                f"border-left:4px solid #22C55E'>"
+                f"<div style='color:#9CA3AF;font-size:0.75rem'>"
+                f"🌱 成長 — {d} ({days_ago}日前)</div>"
+                f"<div style='font-size:1.05rem;margin-top:0.2rem'>{item}</div></div>",
+                unsafe_allow_html=True,
+            )
         else:
-            st.caption("比較にはもう少しデータの蓄積が必要です")
-
-    with g_right:
-        st.caption("あの日の自分から(成長ログ+反証体験)")
-        import random
-        pool = [("growth", d, t) for d, t in growth_entries
-                if d >= today - dt.timedelta(days=90)]
-        pool += [("hansho", h["date"], h) for h in hansho_entries]  # 反証は全期間
-        if pool:
-            kind, d, item = random.Random(today.toordinal()).choice(pool)
-            days_ago = (today - d).days
-            if kind == "growth":
-                st.markdown(
-                    f"<div style='padding:0.8rem 1rem;border-radius:12px;background:#161B22;"
-                    f"border-left:4px solid #22C55E'>"
-                    f"<div style='color:#9CA3AF;font-size:0.75rem'>"
-                    f"🌱 成長 — {d} ({days_ago}日前)</div>"
-                    f"<div style='font-size:1.05rem;margin-top:0.2rem'>{item}</div></div>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                cat = f"「{item['category']}」" if item["category"] else ""
-                learning = item["learning"]
-                if len(learning) > 150:
-                    learning = learning[:150] + "…"
-                st.markdown(
-                    f"<div style='padding:0.8rem 1rem;border-radius:12px;background:#161B22;"
-                    f"border-left:4px solid #A78BFA'>"
-                    f"<div style='color:#9CA3AF;font-size:0.75rem'>"
-                    f"🛡️ 反証体験{cat} — {d} ({days_ago}日前)</div>"
-                    f"<div style='font-weight:600;margin-top:0.2rem'>{item['event']}</div>"
-                    f"<div style='color:#D1D5DB;font-size:0.9rem;margin-top:0.2rem'>"
-                    f"{learning}</div></div>",
-                    unsafe_allow_html=True,
-                )
-        else:
-            st.info("成長ログ・反証体験の記入が貯まると、ここに再登場します")
+            cat = f"「{item['category']}」" if item["category"] else ""
+            learning = item["learning"]
+            if len(learning) > 150:
+                learning = learning[:150] + "…"
+            st.markdown(
+                f"<div style='padding:0.8rem 1rem;border-radius:12px;background:#161B22;"
+                f"border-left:4px solid #A78BFA'>"
+                f"<div style='color:#9CA3AF;font-size:0.75rem'>"
+                f"🛡️ 反証体験{cat} — {d} ({days_ago}日前)</div>"
+                f"<div style='font-weight:600;margin-top:0.2rem'>{item['event']}</div>"
+                f"<div style='color:#D1D5DB;font-size:0.9rem;margin-top:0.2rem'>"
+                f"{learning}</div></div>",
+                unsafe_allow_html=True,
+            )
+    st.caption("詳しい成長指標は上部ナビの「成長」タブへ")
 
 
 # ================= コンディション詳細 =================
@@ -1257,8 +1252,161 @@ def render_habits():
                    "(余裕のある日に瞑想も他の行動もできる、という共通原因が典型です)")
 
 
+# ================= 成長 =================
+def render_growth():
+    st.markdown("#### 🌱 成長 — 過去の自分との比較")
+    period = st.radio("比較期間", ["30日", "90日", "180日", "365日"],
+                      horizontal=True, key="growth_period")
+    P = {"30日": 30, "90日": 90, "180日": 180, "365日": 365}[period]
+    cut1 = today - dt.timedelta(days=P)       # 直近期間の起点
+    cut2 = today - dt.timedelta(days=2 * P)   # 前期間の起点
+
+    def window_mean(df, col, lo, hi):
+        if df.empty:
+            return None
+        vals = df[(df["date"] > lo) & (df["date"] <= hi)][col].dropna()
+        return vals.mean() if len(vals) >= 3 else None
+
+    # --- 比較チップ(直近P日 vs その前P日) ---
+    chips = []
+    for name, unit, good_down in [("RHR", "bpm", True), ("HRV", "ms", False),
+                                   ("睡眠スコア", "", False), ("体重", "kg", True),
+                                   ("体脂肪率", "%", True), ("骨格筋量", "kg", False)]:
+        r = window_mean(cond_all, name, cut1, today)
+        p = window_mean(cond_all, name, cut2, cut1)
+        if r is not None and p is not None:
+            diff = r - p
+            chips.append((name, f"{diff:+.1f} {unit}".strip(),
+                          (diff < 0) if good_down else (diff > 0)))
+    # ランペース・週間距離
+    if not runs_all.empty:
+        pr = runs_all[(runs_all["date"] > cut1)]["pace_sec"].dropna()
+        pp = runs_all[(runs_all["date"] > cut2) & (runs_all["date"] <= cut1)]["pace_sec"].dropna()
+        if len(pr) >= 3 and len(pp) >= 3:
+            diff = pr.mean() - pp.mean()
+            chips.append(("平均ペース",
+                          f"{'+' if diff >= 0 else '−'}{fmt_pace(abs(diff))}/km", diff < 0))
+        kr = runs_all[(runs_all["date"] > cut1)]["km"].sum() / P * 7
+        kp = runs_all[(runs_all["date"] > cut2) & (runs_all["date"] <= cut1)]["km"].sum() / P * 7
+        if kr or kp:
+            chips.append(("走行 km/週", f"{kr - kp:+.1f}", (kr - kp) > 0))
+    # 瞑想 分/週
+    mr = sum(v for d, v in med_min_by_day.items() if d > cut1) / P * 7
+    mp = sum(v for d, v in med_min_by_day.items() if cut2 < d <= cut1) / P * 7
+    if mr or mp:
+        chips.append(("瞑想 分/週", f"{mr - mp:+.0f}", (mr - mp) > 0))
+
+    if chips:
+        st.caption(f"直近{P}日 vs その前{P}日(✨=改善)")
+        for i in range(0, len(chips), 4):
+            cols = st.columns(4)
+            for c, (name, val, improved) in zip(cols, chips[i:i + 4]):
+                c.metric(name, val + (" ✨" if improved else ""))
+    else:
+        st.info("この期間の比較にはまだデータが足りません")
+
+    # --- 積み上げ資産(絶対に減らない数字) ---
+    st.divider()
+    st.markdown("#### 🏔️ 積み上げ資産")
+    a1, a2, a3, a4, a5 = st.columns(5)
+    a1.metric("生涯走行", f"{lifetime_km:.0f} km")
+    a2.metric("瞑想 累計", f"{med_total_min / 60:.1f} h")
+    a3.metric("日次ログ 通算", f"{TOTALS['log'][0]} 日")
+    a4.metric("最長ストリーク", f"{max(TOTALS['log'][1], TOTALS['med'][1])} 日")
+    n_books = len([p for p in alltime.get("tadoku_all", []) if na.prop_date(p, "読了")])
+    a5.metric("読了", f"{n_books} 冊")
+
+    g1, g2 = st.columns(2)
+    with g1:
+        if not runs_all.empty:
+            cum = runs_all.groupby("date")["km"].sum().cumsum().reset_index()
+            st.caption("累計走行距離 (km)")
+            fig = go.Figure(go.Scatter(x=cum["date"], y=cum["km"], mode="lines",
+                                       line=dict(color="#22C55E", width=3),
+                                       fill="tozeroy"))
+            fig.update_layout(height=230, margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig, use_container_width=True)
+    with g2:
+        if med_min_by_day:
+            md = pd.DataFrame(sorted(med_min_by_day.items()), columns=["date", "分"])
+            md["累計h"] = md["分"].cumsum() / 60
+            st.caption("瞑想 累計時間 (h)")
+            fig = go.Figure(go.Scatter(x=md["date"], y=md["累計h"], mode="lines",
+                                       line=dict(color="#A78BFA", width=3),
+                                       fill="tozeroy"))
+            fig.update_layout(height=230, margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig, use_container_width=True)
+
+    # --- 長期の身体トレンド(7日移動平均) ---
+    st.divider()
+    st.markdown(f"#### 📈 身体トレンド(直近{P}日・7日移動平均)")
+    win = cond_all[cond_all["date"] > cut1].copy() if not cond_all.empty else pd.DataFrame()
+    if len(win) >= 7:
+        for col in ["RHR", "HRV", "睡眠スコア"]:
+            win[col + "_ma"] = win[col].rolling(7, min_periods=3).mean()
+        t1, t2 = st.columns(2)
+        with t1:
+            st.caption("安静時心拍 RHR(低いほど良い)")
+            st.plotly_chart(line_fig(win.rename(columns={"RHR_ma": "RHR 7日平均"}),
+                                     {"RHR 7日平均": "#F97316"}, height=220),
+                            use_container_width=True)
+        with t2:
+            st.caption("夜間HRV(高いほど良い)")
+            st.plotly_chart(line_fig(win.rename(columns={"HRV_ma": "HRV 7日平均"}),
+                                     {"HRV 7日平均": "#22C55E"}, height=220),
+                            use_container_width=True)
+    else:
+        st.info("トレンド表示にはもう少しデータが必要です")
+
+    # --- 月別の習慣継続 ---
+    st.divider()
+    st.markdown("#### 📅 月別の継続(直近12ヶ月)")
+    months = pd.period_range(end=pd.Timestamp(today), periods=12, freq="M")
+    rows = {"月": [str(m) for m in months]}
+    for label, dates in [("日次ログ", _all_log_dates), ("瞑想", _all_med_dates)]:
+        rows[label] = [sum(1 for d in dates if pd.Period(d, freq="M") == m)
+                       for m in months]
+    mdf = pd.DataFrame(rows)
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=mdf["月"], y=mdf["日次ログ"], name="日次ログ",
+                         marker_color="#22C55E"))
+    fig.add_trace(go.Bar(x=mdf["月"], y=mdf["瞑想"], name="瞑想",
+                         marker_color="#A78BFA"))
+    fig.update_layout(barmode="group", height=260,
+                      margin=dict(l=10, r=10, t=10, b=10),
+                      legend=dict(orientation="h", y=1.12),
+                      yaxis_title="実施日数/月")
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("棒が並び続けること自体が成果。完璧な月である必要はありません")
+
+    # --- あの日の自分から(2枚) ---
+    st.divider()
+    st.markdown("#### 💬 あの日の自分から")
+    import random
+    r = random.Random(today.toordinal() + 1)  # 今日ページとは別の種
+    c1, c2 = st.columns(2)
+    g_pool = [(d, t) for d, t in growth_entries]
+    if g_pool:
+        d, t = r.choice(g_pool)
+        c1.markdown(
+            f"<div style='padding:0.8rem 1rem;border-radius:12px;background:#161B22;"
+            f"border-left:4px solid #22C55E'>"
+            f"<div style='color:#9CA3AF;font-size:0.75rem'>🌱 {d} ({(today - d).days}日前)</div>"
+            f"<div style='margin-top:0.2rem'>{t}</div></div>", unsafe_allow_html=True)
+    if hansho_entries:
+        h = r.choice(hansho_entries)
+        learning = h["learning"][:150] + ("…" if len(h["learning"]) > 150 else "")
+        c2.markdown(
+            f"<div style='padding:0.8rem 1rem;border-radius:12px;background:#161B22;"
+            f"border-left:4px solid #A78BFA'>"
+            f"<div style='color:#9CA3AF;font-size:0.75rem'>🛡️ {h['category']} — {h['date']}</div>"
+            f"<div style='font-weight:600;margin-top:0.2rem'>{h['event']}</div>"
+            f"<div style='color:#D1D5DB;font-size:0.9rem;margin-top:0.2rem'>{learning}</div></div>",
+            unsafe_allow_html=True)
+
+
 PAGES = {"今日": render_today, "コンディション": render_condition,
-         "目標": render_goals, "習慣": render_habits}
+         "目標": render_goals, "習慣": render_habits, "成長": render_growth}
 PAGES[page]()
 
 _sync_all = alltime.get("_synced_at")
