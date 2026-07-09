@@ -130,10 +130,13 @@ def fetch_all(token: str, days: int = 30) -> dict[str, list[dict]]:
         "daily_log": (DS_DAILY_LOG, _date_filter("日付", since_recent)),
         "thoughts_open": (DS_THOUGHT, {"filter": {
             "property": "ステータス", "select": {"does_not_equal": "完了"}}}),
-        "tasks_today": (DS_TASK, {"filter": {
-            "property": "実行日時",
-            "date": {"equals": today.isoformat()},
-        }}),
+        "tasks_today": (DS_TASK, {"filter": {"and": [
+            # JSTの1日を明示範囲で指定(dateのみのequalsはUTC比較の罠がある)
+            {"property": "実行日時",
+             "date": {"on_or_after": f"{today.isoformat()}T00:00:00+09:00"}},
+            {"property": "実行日時",
+             "date": {"before": f"{(today + dt.timedelta(days=1)).isoformat()}T00:00:00+09:00"}},
+        ]}}),
         "tasks_must_due": (DS_TASK, {"filter": {"and": [
             {"property": "優先度", "select": {"equals": "Must"}},
             {"property": "締め切り", "date": {"on_or_before": week_end.isoformat()}},
@@ -186,7 +189,7 @@ def fetch_alltime(token: str) -> dict[str, list[dict]]:
         "hansho_all": (DS_HANSHO, {"sorts": [{"property": "日付", "direction": "ascending"}]}),
         "tasks_30d": (DS_TASK, {"filter": {
             "property": "実行日時",
-            "date": {"on_or_after": since30.isoformat()},
+            "date": {"on_or_after": f"{since30.isoformat()}T00:00:00+09:00"},
         }}),
     }
     out: dict[str, list[dict]] = {}
