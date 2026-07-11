@@ -1514,7 +1514,11 @@ def render_compass():
         for p in alltime.get("compass_all", [])
     ]
     if not rows:
-        st.info("羅針盤DBが未接続か空です。DBにclaude-agentの接続を追加してください")
+        st.info("羅針盤DBが未接続か空です。DBにclaude-agentの接続を追加してください。"
+                "接続済みの場合はキャッシュが古い可能性があります(全期間データは1時間毎)")
+        if st.button("🔄 データを再取得", key="compass_refresh"):
+            st.cache_data.clear()
+            st.rerun()
         return
     rows.sort(key=lambda r: r["order"])
     values = [r for r in rows if r["kind"] == "価値観"]
