@@ -397,7 +397,7 @@ head_l.markdown(
     f"## 🎯 KPI <span style='font-size:0.9rem;color:#9CA3AF'>{today}{_sync_txt}</span>",
     unsafe_allow_html=True,
 )
-page = head_r.radio("page", ["今日", "コンディション", "目標", "習慣", "成長", "羅針盤"],
+page = head_r.radio("page", ["羅針盤", "今日", "コンディション", "目標", "習慣", "成長"],
                     horizontal=True, key="nav", label_visibility="collapsed")
 
 
