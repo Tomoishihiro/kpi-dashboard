@@ -127,11 +127,11 @@ def fmt_pace(sec: float) -> str:
     return f"{int(sec // 60)}'{int(sec % 60):02d}\""
 
 
-def parse_wake_min(text: str):
+def parse_wake_min(text):
     """ISO日時('...T06:45:00+09:00') や '6:45' から 深夜0時基準の分。失敗時 None。"""
     import re
-    if not text:
-        return None
+    if not isinstance(text, str) or not text:
+        return None  # None/NaN/数値など文字列以外はすべて未記録扱い
     # ISO日時形式ならTの後ろの時刻を、そうでなければ全体から HH:MM を拾う
     m = re.search(r"T(\d{2}):(\d{2})", text) or re.search(r"(\d{1,2})[:時](\d{1,2})", text)
     if not m:
