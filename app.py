@@ -31,7 +31,8 @@ except ImportError:
 TOKEN = st.secrets["NOTION_TOKEN"]
 
 JST = dt.timezone(dt.timedelta(hours=9))
-SIGNAL_COLOR = {"青": "#3B82F6", "黄": "#EAB308", "赤": "#EF4444", None: "#6B7280"}
+SIGNAL_COLOR = {"青": "#3B82F6", "緑": "#22C55E", "黄": "#EAB308",
+                "橙": "#F97316", "赤": "#EF4444", None: "#6B7280"}
 
 GOAL_KM = 100.0
 STRETCH_KM = 150.0  # 年間ストレッチ目標
@@ -59,9 +60,11 @@ def linked_header(title: str, url: str) -> str:
             f"<span style='font-size:0.7em;color:#6B7280'>↗</span></a></h4>")
 
 MODE_RULES = {
+    "絶好調": ("🔵", "攻めてよい日。負荷の高いタスクや挑戦を前に"),
     "通常運転": ("🟢", "通常タスク+ラン可(種別自由)"),
     "セーブ運転(身体)": ("🟡", "重要タスク1件に絞る/ランはEasy・Recoveryのみ/22時半就寝"),
     "セーブ運転(神経)": ("🟡", "会議・対人負荷を減らす/瞑想を優先/カフェイン午前まで"),
+    "要注意": ("🟠", "無理をしない。Mustのみ/軽い運動に留める/早めの休息"),
     "回復日": ("🔴", "ランなし/最低限のMustのみ/夜は入浴+早寝"),
     "未記録": ("⚪", "今朝のコンディションを記録すると今日のモードが出ます"),
 }
@@ -70,11 +73,15 @@ MODE_RULES = {
 def today_mode(total, body, ans) -> str:
     if total == "赤":
         return "回復日"
+    if total == "橙":
+        return "要注意"
     if total == "青":
+        return "絶好調"
+    if total == "緑":
         return "通常運転"
     if total == "黄":
-        body_bad = body in ("黄", "赤")
-        ans_bad = ans in ("黄", "赤")
+        body_bad = body in ("黄", "橙", "赤")
+        ans_bad = ans in ("黄", "橙", "赤")
         if body_bad and not ans_bad:
             return "セーブ運転(身体)"
         if ans_bad and not body_bad:
@@ -121,9 +128,12 @@ def fmt_pace(sec: float) -> str:
 
 
 def parse_wake_min(text: str):
-    """'6:45' / '06:45' / '6時45分' → 深夜0時からの分。失敗時 None。"""
+    """ISO日時('...T06:45:00+09:00') や '6:45' から 深夜0時基準の分。失敗時 None。"""
     import re
-    m = re.search(r"(\d{1,2})[:時](\d{1,2})", text or "")
+    if not text:
+        return None
+    # ISO日時形式ならTの後ろの時刻を、そうでなければ全体から HH:MM を拾う
+    m = re.search(r"T(\d{2}):(\d{2})", text) or re.search(r"(\d{1,2})[:時](\d{1,2})", text)
     if not m:
         return None
     h, mi = int(m.group(1)), int(m.group(2))
@@ -209,7 +219,7 @@ cond = pd.DataFrame([
         "疲労度": na.prop_number(p, "主観的疲労度"),
         "幸福度": na.prop_number(p, "主観的幸福度"),
         "瞑想": na.prop_has_relation(p, "瞑想記録"),
-        "起床": na.prop_rich_text(p, "起床時刻"),
+        "起床": na.prop_date(p, "起床時間"),  # H:mm形式のdate型
         "フィードバック": na.prop_rich_text(p, "フィードバック"),
     }
     for p in data["condition"]
@@ -309,6 +319,7 @@ for p in alltime.get("hansho_all", []):
             "event": event,
             "learning": learning,
             "category": na.prop_select(p, "カテゴリ") or "",
+            "concepts": na.prop_multi_select(p, "対応概念"),
         })
 
 # 日別タスク消化率(実行日時ベース、過去30日)
@@ -352,6 +363,20 @@ if not runs_all.empty:
                             for p in alltime.get("running_all", [])
                             if na.prop_date(p, "日時")]
     runs_all = runs_all.sort_values("date")
+
+at_df = pd.DataFrame([
+    {
+        "date": na.prop_date(p, "発生日時"),
+        "強度": na.prop_number(p, "感情強度(0~5)"),
+        "バイアス": na.prop_multi_select(p, "バイアス(悪癖)"),
+        "内容": na.prop_title(p, "自動思考の内容"),
+        "再解釈": na.prop_rich_text(p, "振り返り・再解釈").strip(),
+    }
+    for p in alltime.get("autothought_all", []) if na.prop_date(p, "発生日時")
+])
+if not at_df.empty:
+    at_df["date"] = at_df["date"].map(_to_date)
+    at_df = at_df.sort_values("date")
 task_done_by_day = {d: done for d, (tot, done) in _task_daily.items() if tot > 0}
 
 # 瞑想実施の判定は瞑想記録DBの日付を正とする(コンディションのリレーション非依存)
@@ -372,7 +397,7 @@ head_l.markdown(
     f"## 🎯 KPI <span style='font-size:0.9rem;color:#9CA3AF'>{today}{_sync_txt}</span>",
     unsafe_allow_html=True,
 )
-page = head_r.radio("page", ["今日", "コンディション", "目標", "習慣", "成長"],
+page = head_r.radio("page", ["今日", "コンディション", "目標", "習慣", "成長", "羅針盤"],
                     horizontal=True, key="nav", label_visibility="collapsed")
 
 
@@ -766,8 +791,7 @@ def render_condition():
                          columns=["起床", "消化率", "完了数/日", "n"]),
                          hide_index=True, use_container_width=True)
     else:
-        st.caption("🌅 起床時刻の分析は、コンディション記録に「起床時刻」"
-                   "プロパティ(テキスト、例 6:45)を追加して記録を始めると表示されます")
+        st.caption("🌅 起床時間の記録が貯まると、起床時刻別のタスク処理が表示されます")
     st.caption("※ いずれも相関の観察(忙しい日はタスクが多く消化率が下がる等、母数の影響に注意)")
 
     # ---- 信号別タスク消化率(モード運用の監査) ----
@@ -777,7 +801,7 @@ def render_condition():
                "赤の日に低いのは設計通りの休養、青の日まで低ければ別の問題。")
     sig_by_day = {r["date"]: r["総合"] for _, r in cond.iterrows() if r["総合"]}
     rows = []
-    for color in ["青", "黄", "赤"]:
+    for color in ["青", "緑", "黄", "橙", "赤"]:
         rates = [task_rate_by_day[d] for d, s in sig_by_day.items()
                  if s == color and d in task_rate_by_day]
         if rates:
@@ -785,8 +809,8 @@ def render_condition():
     if rows:
         cols = st.columns(3)
         for c, (color, avg, n) in zip(cols, rows):
-            c.metric(f"{'🔵' if color == '青' else '🟡' if color == '黄' else '🔴'} "
-                     f"{color}の日 (n={n})", f"{avg:.0f}%")
+            _ico = {"青": "🔵", "緑": "🟢", "黄": "🟡", "橙": "🟠", "赤": "🔴"}
+            c.metric(f"{_ico.get(color, '⚪')} {color}の日 (n={n})", f"{avg:.0f}%")
         fig = go.Figure(go.Bar(
             x=[r[0] for r in rows], y=[r[1] for r in rows],
             marker_color=[SIGNAL_COLOR[r[0]] for r in rows],
@@ -1379,6 +1403,75 @@ def render_growth():
     st.plotly_chart(fig, use_container_width=True)
     st.caption("棒が並び続けること自体が成果。完璧な月である必要はありません")
 
+    # --- 思考の天気(嵐は過ぎる) ---
+    st.divider()
+    st.markdown("#### 🌊 思考の天気 — 嵐は過ぎる")
+    if not at_df.empty:
+        strong = at_df[at_df["強度"].fillna(0) >= 4]
+        last_storm = strong["date"].max() if not strong.empty else None
+        calm_days = (today - last_storm).days if last_storm else None
+        n30 = len(at_df[at_df["date"] > today - dt.timedelta(days=30)])
+        n30p = len(at_df[(at_df["date"] > today - dt.timedelta(days=60)) &
+                         (at_df["date"] <= today - dt.timedelta(days=30))])
+        w1, w2, w3 = st.columns(3)
+        if calm_days is not None:
+            w1.metric("強い思考(強度4+)から", f"{calm_days} 日",
+                      "凪が続いています" if calm_days >= 7 else None,
+                      delta_color="off")
+        w2.metric("直近30日の記録", f"{n30} 件",
+                  f"{n30 - n30p:+d} vs その前30日", delta_color="off")
+        w3.metric("通算の観察数", f"{len(at_df)} 件")
+
+        # 嵐マップ: 全期間の強度散布図
+        colors = at_df["強度"].fillna(0).map(
+            lambda s: "#EF4444" if s >= 4 else "#F97316" if s >= 3 else "#6B7280")
+        fig = go.Figure(go.Scatter(
+            x=at_df["date"], y=at_df["強度"], mode="markers",
+            marker=dict(size=9, color=list(colors),
+                        line=dict(color="#0B0F14", width=1)),
+            hovertext=[f"{r['date']} 強度{r['強度']:.0f}" for _, r in at_df.iterrows()],
+            hoverinfo="text"))
+        fig.update_layout(height=240, margin=dict(l=10, r=10, t=10, b=10),
+                          yaxis=dict(title="感情強度", range=[-0.4, 5.4]))
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("赤い点(強い嵐)は続かない。点と点の間の空白こそが、記録が教えてくれる事実")
+
+        # 月別バイアスの内訳(12ヶ月)
+        atb = at_df[at_df["date"] > today - dt.timedelta(days=365)].explode("バイアス").dropna(subset=["バイアス"])
+        if not atb.empty:
+            atb["month"] = atb["date"].map(lambda d: f"{d.year}-{d.month:02d}")
+            pv = atb.pivot_table(index="month", columns="バイアス",
+                                 values="date", aggfunc="count").fillna(0)
+            figb = go.Figure()
+            for col in pv.columns:
+                figb.add_trace(go.Bar(x=pv.index, y=pv[col], name=col))
+            figb.update_layout(barmode="stack", height=240,
+                               margin=dict(l=10, r=10, t=10, b=10),
+                               legend=dict(orientation="h", y=1.15),
+                               yaxis_title="件/月")
+            st.plotly_chart(figb, use_container_width=True)
+
+        # 過ぎ去った嵐(30日以上前・強度4+・再解釈あり のみ再掲示)
+        past_storms = [r for _, r in strong.iterrows()
+                       if r["再解釈"] and r["date"] <= today - dt.timedelta(days=30)]
+        if past_storms:
+            import random
+            r = random.Random(today.toordinal() + 3).choice(past_storms)
+            naiyo = r["内容"][:80] + ("…" if len(r["内容"]) > 80 else "")
+            saikai = r["再解釈"][:160] + ("…" if len(r["再解釈"]) > 160 else "")
+            st.markdown(
+                f"<div style='padding:0.9rem 1.1rem;border-radius:12px;background:#161B22;"
+                f"border-left:4px solid #3B82F6'>"
+                f"<div style='color:#9CA3AF;font-size:0.75rem'>"
+                f"⛈️ 過ぎ去った嵐 — {r['date']} ({(today - r['date']).days}日前・強度{r['強度']:.0f})</div>"
+                f"<div style='color:#9CA3AF;font-size:0.9rem;margin-top:0.25rem;"
+                f"text-decoration:line-through'>{naiyo}</div>"
+                f"<div style='margin-top:0.35rem'>💡 {saikai}</div></div>",
+                unsafe_allow_html=True)
+            st.caption("あのとき最強度だった思考も、いまは再解釈と一緒に過去にある")
+    else:
+        st.info("自動思考カウントの記録が貯まると、ここに「嵐は過ぎる」の証拠が積み上がります")
+
     # --- あの日の自分から(2枚) ---
     st.divider()
     st.markdown("#### 💬 あの日の自分から")
@@ -1405,8 +1498,87 @@ def render_growth():
             unsafe_allow_html=True)
 
 
+# ================= 羅針盤 =================
+URL_COMPASS_DB = "https://app.notion.com/p/d3d820cabc89486bbc2051bd77a07e24"
+
+
+def render_compass():
+    rows = [
+        {
+            "name": na.prop_title(p, "名前"),
+            "kind": na.prop_select(p, "種別"),
+            "line": na.prop_rich_text(p, "一行"),
+            "order": na.prop_number(p, "順序") or 999,
+            "url": p.get("url", URL_COMPASS_DB),
+        }
+        for p in alltime.get("compass_all", [])
+    ]
+    if not rows:
+        st.info("羅針盤DBが未接続か空です。DBにclaude-agentの接続を追加してください")
+        return
+    rows.sort(key=lambda r: r["order"])
+    values = [r for r in rows if r["kind"] == "価値観"]
+    questions = [r for r in rows if r["kind"] == "毎日の問い"]
+    concepts = [r for r in rows if r["kind"] == "概念再定義"]
+
+    import random
+    rnd = random.Random(today.toordinal() + 7)
+
+    # --- 今日の問い(日替わり1問) ---
+    if questions:
+        q = questions[today.toordinal() % len(questions)]  # 順繰りで全問回る
+        st.markdown(
+            f"<div style='padding:1.2rem 1.4rem;border-radius:14px;background:#161B22;"
+            f"border:1px solid #30363D;text-align:center'>"
+            f"<div style='color:#9CA3AF;font-size:0.75rem'>今日の問い</div>"
+            f"<div style='font-size:1.35rem;font-weight:700;margin-top:0.3rem'>"
+            f"{q['line']}</div></div>",
+            unsafe_allow_html=True)
+
+    # --- 価値観カード ---
+    st.markdown(f"##### 🧭 価値観 [DB↗]({URL_COMPASS_DB})")
+    cols = st.columns(len(values) or 1)
+    for c, v in zip(cols, values):
+        name = v["name"].split("｜")[0]
+        label = v["name"].split("｜")[1] if "｜" in v["name"] else ""
+        c.markdown(
+            f"<a href='{v['url']}' target='_blank' style='text-decoration:none'>"
+            f"<div style='padding:0.7rem;border-radius:12px;background:#161B22;"
+            f"border:1px solid #30363D;height:100%'>"
+            f"<div style='font-weight:700'>{name}</div>"
+            f"<div style='color:#9CA3AF;font-size:0.7rem'>{label}</div>"
+            f"<div style='font-size:0.82rem;margin-top:0.35rem;color:#D1D5DB'>"
+            f"{v['line']}</div></div></a>",
+            unsafe_allow_html=True)
+
+    # --- 概念の再定義(反証体験の裏打ち件数つき) ---
+    st.markdown("##### 🎴 9つの概念 — 揺らいだときに読む")
+    concept_counts = {}
+    for h in hansho_entries:
+        for cpt in h.get("concepts", []):
+            concept_counts[cpt] = concept_counts.get(cpt, 0) + 1
+    for i in range(0, len(concepts), 3):
+        cols = st.columns(3)
+        for c, cpt in zip(cols, concepts[i:i + 3]):
+            n = concept_counts.get(cpt["name"], 0)
+            badge = (f"<span style='background:#A78BFA33;color:#A78BFA;"
+                     f"border-radius:8px;padding:0.05rem 0.45rem;font-size:0.7rem'>"
+                     f"反証 {n}件</span>") if n else ""
+            c.markdown(
+                f"<a href='{cpt['url']}' target='_blank' style='text-decoration:none'>"
+                f"<div style='padding:0.7rem;border-radius:12px;background:#161B22;"
+                f"border:1px solid #30363D;margin-bottom:0.5rem'>"
+                f"<div style='font-weight:700'>{cpt['name']} {badge}</div>"
+                f"<div style='font-size:0.85rem;margin-top:0.3rem;color:#D1D5DB'>"
+                f"{cpt['line']}</div></div></a>",
+                unsafe_allow_html=True)
+    st.caption("反証◯件 = その概念の新しい定義を裏打ちする体験の数(反証体験ログの対応概念タグより)。"
+               "カードをタップすると詳細ページへ")
+
+
 PAGES = {"今日": render_today, "コンディション": render_condition,
-         "目標": render_goals, "習慣": render_habits, "成長": render_growth}
+         "目標": render_goals, "習慣": render_habits, "成長": render_growth,
+         "羅針盤": render_compass}
 PAGES[page]()
 
 _sync_all = alltime.get("_synced_at")

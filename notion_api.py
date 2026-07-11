@@ -28,6 +28,8 @@ DS_TADOKU = "26f6e5b9-ef10-802c-bd4e-000b2ecbfa6a"      # 多読記録
 DS_ACTION = "3526e5b9-ef10-800d-9067-000b606d65a1"      # アクション・問い
 DS_HANSHO = "1b6ccdbb-90e1-40e9-92b6-31286c7c506a"      # 反証体験ログ
 DS_MEAL = "c286a9de-3db6-45ee-b055-cb8c21620601"        # 🍽️ 食事記録
+DS_COMPASS = "a5265eef-1a2a-476d-ab6b-74ef0c050b1f"     # 🧭 羅針盤
+DS_AUTOTHOUGHT = "24e6e5b9-ef10-8076-b744-000bffce049f" # 自動思考カウント
 
 
 def _headers(token: str) -> dict:
@@ -187,6 +189,8 @@ def fetch_alltime(token: str) -> dict[str, list[dict]]:
         "meditation_all": (DS_MEDITATION, {"sorts": [{"property": "日付", "direction": "ascending"}]}),
         "tadoku_all": (DS_TADOKU, {}),
         "hansho_all": (DS_HANSHO, {"sorts": [{"property": "日付", "direction": "ascending"}]}),
+        "compass_all": (DS_COMPASS, {"sorts": [{"property": "順序", "direction": "ascending"}]}),
+        "autothought_all": (DS_AUTOTHOUGHT, {"sorts": [{"property": "発生日時", "direction": "ascending"}]}),
         "tasks_30d": (DS_TASK, {"filter": {
             "property": "実行日時",
             "date": {"on_or_after": f"{since30.isoformat()}T00:00:00+09:00"},
