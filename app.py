@@ -1500,6 +1500,7 @@ def render_growth():
 
 # ================= 羅針盤 =================
 URL_COMPASS_DB = "https://app.notion.com/p/d3d820cabc89486bbc2051bd77a07e24"
+URL_HANSHO_DB = "https://app.notion.com/p/f9f0d1476b1d451088407926e57fe385"
 
 
 def render_compass():
@@ -1556,7 +1557,10 @@ def render_compass():
             unsafe_allow_html=True)
 
     # --- 概念の再定義(反証体験の裏打ち件数つき) ---
-    st.markdown("##### 🎴 9つの概念 — 揺らいだときに読む")
+    st.markdown(f"##### 🎴 9つの概念 — 揺らいだときに読む "
+               f"<a href='{URL_HANSHO_DB}' target='_blank' "
+               f"style='font-size:0.7em;color:#A78BFA;text-decoration:none'>"
+               f"🛡️ 反証体験ログを開く ↗</a>", unsafe_allow_html=True)
     concept_counts = {}
     for h in hansho_entries:
         for cpt in h.get("concepts", []):
