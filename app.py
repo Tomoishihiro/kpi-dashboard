@@ -1556,6 +1556,48 @@ def render_compass():
             f"{v['line']}</div></div></a>",
             unsafe_allow_html=True)
 
+    # --- ライフストーリー(人生の折れ線) ---
+    URL_LIFESTORY = "https://app.notion.com/p/37a6e5b9ef1081d8a2fbf194506ada45"
+    URL_LIFE_DB = "https://app.notion.com/p/09f714353f5248deabcb69660f0151f0"
+    life = pd.DataFrame([
+        {
+            "date": na.prop_date(p, "時期"),
+            "score": na.prop_number(p, "スコア"),
+            "name": na.prop_title(p, "名前"),
+            "line": na.prop_rich_text(p, "一行"),
+            "url": p.get("url", URL_LIFE_DB),
+        }
+        for p in alltime.get("life_all", []) if na.prop_date(p, "時期")
+    ])
+    if not life.empty:
+        life["date"] = life["date"].map(_to_date)
+        life = life.dropna(subset=["score"]).sort_values("date")
+        st.markdown(f"##### 📖 ライフストーリー "
+                    f"<a href='{URL_LIFESTORY}' target='_blank' "
+                    f"style='font-size:0.7em;color:#3B82F6;text-decoration:none'>"
+                    f"物語を読む ↗</a>　"
+                    f"<a href='{URL_LIFE_DB}' target='_blank' "
+                    f"style='font-size:0.7em;color:#9CA3AF;text-decoration:none'>"
+                    f"イベントDB ↗</a>", unsafe_allow_html=True)
+        hover = [
+            f"<b>{r['name']}</b> ({r['date'].year})<br>スコア {r['score']:+.0f}"
+            + (f"<br><i>💡 {r['line']}</i>" if r["line"] else "")
+            for _, r in life.iterrows()
+        ]
+        colors = ["#22C55E" if s >= 0 else "#F97316" for s in life["score"]]
+        fig = go.Figure(go.Scatter(
+            x=life["date"], y=life["score"], mode="lines+markers",
+            line=dict(color="#6B7280", width=2),
+            marker=dict(size=10, color=colors, line=dict(color="#0B0F14", width=1)),
+            hovertext=hover, hoverinfo="text"))
+        fig.add_hline(y=0, line_color="#30363D")
+        fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10),
+                          yaxis=dict(title="満足度", range=[-5.6, 5.6],
+                                     tickvals=[-5, 0, 5]))
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("どの谷にも、引き上げたものがあった(点にタッチすると表示)。"
+                   "スコアや出来事の見直しはイベントDBから")
+
     # --- 概念の再定義(反証体験の裏打ち件数つき) ---
     st.markdown(f"##### 🎴 9つの概念 — 揺らいだときに読む "
                f"<a href='{URL_HANSHO_DB}' target='_blank' "

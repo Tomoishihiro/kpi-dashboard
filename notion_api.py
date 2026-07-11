@@ -30,6 +30,7 @@ DS_HANSHO = "1b6ccdbb-90e1-40e9-92b6-31286c7c506a"      # 反証体験ログ
 DS_MEAL = "c286a9de-3db6-45ee-b055-cb8c21620601"        # 🍽️ 食事記録
 DS_COMPASS = "a5265eef-1a2a-476d-ab6b-74ef0c050b1f"     # 🧭 羅針盤
 DS_AUTOTHOUGHT = "24e6e5b9-ef10-8076-b744-000bffce049f" # 自動思考カウント
+DS_LIFE = "7fe65d82-39c1-44e5-8a97-74fb0eb4a6ab"        # 📖 ライフイベント
 
 
 def _headers(token: str) -> dict:
@@ -191,6 +192,7 @@ def fetch_alltime(token: str) -> dict[str, list[dict]]:
         "hansho_all": (DS_HANSHO, {"sorts": [{"property": "日付", "direction": "ascending"}]}),
         "compass_all": (DS_COMPASS, {"sorts": [{"property": "順序", "direction": "ascending"}]}),
         "autothought_all": (DS_AUTOTHOUGHT, {"sorts": [{"property": "発生日時", "direction": "ascending"}]}),
+        "life_all": (DS_LIFE, {"sorts": [{"property": "時期", "direction": "ascending"}]}),
         "tasks_30d": (DS_TASK, {"filter": {
             "property": "実行日時",
             "date": {"on_or_after": f"{since30.isoformat()}T00:00:00+09:00"},
