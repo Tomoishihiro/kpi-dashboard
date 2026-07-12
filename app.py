@@ -409,23 +409,7 @@ def render_today():
     mode = today_mode(*sig)
     icon, action = MODE_RULES[mode]
 
-    # ---- 今日の記録漏れチェック ----
-    learn_dates = set()
-    for p in data.get("learning", []):
-        d = na.prop_date(p, "日付")
-        if d:
-            learn_dates.add(pd.to_datetime(d, utc=True).tz_convert("Asia/Tokyo").date())
-    missing = []
-    if not is_today:
-        missing.append(f"[コンディション]({URL_COND_DB})")
-    if today not in log_dates:
-        missing.append(f"[日次ログ]({URL_DAILY_DB})")
-    if today not in med_dates:
-        missing.append(f"[瞑想]({URL_MED_DB})")
-    if today not in learn_dates:
-        missing.append(f"[学習記録]({URL_LEARNING_DB})")
-    if missing:
-        st.caption("✍️ 今日まだ: " + " ・ ".join(missing))
+
 
     c1, c2, c3, c4 = st.columns([1, 1, 1, 2.2])
     c1.markdown(signal_badge("総合", sig[0]), unsafe_allow_html=True)
@@ -440,6 +424,64 @@ def render_today():
     )
     if is_today and latest["フィードバック"]:
         st.caption(f"💬 {latest['フィードバック']}")
+
+    # ---- 今日のチェックボード ----
+    learn_dates = set()
+    for p in data.get("learning", []):
+        d = na.prop_date(p, "日付")
+        if d:
+            learn_dates.add(pd.to_datetime(d, utc=True).tz_convert("Asia/Tokyo").date())
+    run_today = (not runs.empty) and (today in set(runs["date"]))
+
+    # (絵文字, 名前, 済んだか, リンク先, ストリーク, コア習慣か)
+    tiles = [
+        ("💆", "コンディション", is_today, URL_COND_DB, None, True),
+        ("📝", "日次ログ", today in log_dates, URL_DAILY_DB,
+         streak_from(log_dates, today), True),
+        ("🧘", "瞑想", today in med_dates, URL_MED_DB,
+         streak_from(med_dates, today), True),
+        ("🤸", "ストレッチ", today in stretch_dates, URL_DAILY_DB,
+         streak_from(stretch_dates, today), True),
+        ("🎧", "学習", today in learn_dates, URL_LEARNING_DB, None, False),
+        ("🏃", "ラン", run_today, URL_RUN_DB, None, False),
+    ]
+    core_done = sum(1 for _, _, done, *_ in tiles if done and _)
+    core_total = sum(1 for t in tiles if t[5])
+    core_done = sum(1 for t in tiles if t[5] and t[2])
+
+    cols = st.columns(len(tiles))
+    for c, (emoji, name, done, url, streak, core) in zip(cols, tiles):
+        if done:
+            html = (
+                f"<a href='{url}' target='_blank' style='text-decoration:none'>"
+                f"<div style='text-align:center;padding:0.65rem 0.2rem;border-radius:14px;"
+                f"background:#22C55E22;border:2px solid #22C55E'>"
+                f"<div style='font-size:1.6rem'>{emoji}</div>"
+                f"<div style='font-size:0.78rem;font-weight:700;color:#22C55E'>"
+                f"{name} ✓</div></div></a>")
+        elif core:
+            nudge = (f"🔥{streak}→{streak + 1}" if streak else "今日から")
+            html = (
+                f"<a href='{url}' target='_blank' style='text-decoration:none'>"
+                f"<div style='text-align:center;padding:0.65rem 0.2rem;border-radius:14px;"
+                f"background:#161B22;border:2px dashed #6B7280'>"
+                f"<div style='font-size:1.6rem;filter:grayscale(1);opacity:0.55'>{emoji}</div>"
+                f"<div style='font-size:0.78rem;color:#9CA3AF'>{name}</div>"
+                f"<div style='font-size:0.7rem;color:#EAB308'>{nudge}</div></div></a>")
+        else:
+            html = (
+                f"<a href='{url}' target='_blank' style='text-decoration:none'>"
+                f"<div style='text-align:center;padding:0.65rem 0.2rem;border-radius:14px;"
+                f"background:#161B22;border:1px solid #30363D'>"
+                f"<div style='font-size:1.6rem;filter:grayscale(1);opacity:0.4'>{emoji}</div>"
+                f"<div style='font-size:0.78rem;color:#6B7280'>{name}</div></div></a>")
+        c.markdown(html, unsafe_allow_html=True)
+
+    if core_done == core_total:
+        st.caption(f"🎉 今日のコア習慣 {core_total}/{core_total} 完了。あとは自由時間")
+    else:
+        st.caption(f"コア習慣 {core_done}/{core_total} ・ タイルをタップで記録へ"
+                   "(🎧🏃は任意)")
 
     st.divider()
     mid_l, mid_r = st.columns([2, 1])
