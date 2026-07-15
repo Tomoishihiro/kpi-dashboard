@@ -85,6 +85,19 @@ def prop_date(page: dict, name: str):
     return d.get("start") if d else None
 
 
+def prop_date_range(page: dict, name: str) -> tuple:
+    """date プロパティの (start, end) を返す。無ければ (None, None)。"""
+    d = page.get("properties", {}).get(name, {}).get("date")
+    if not d:
+        return (None, None)
+    return (d.get("start"), d.get("end"))
+
+
+def prop_formula_number(page: dict, name: str):
+    f = page.get("properties", {}).get(name, {}).get("formula") or {}
+    return f.get("number")
+
+
 def prop_checkbox(page: dict, name: str) -> bool:
     return bool(page.get("properties", {}).get(name, {}).get("checkbox"))
 
@@ -147,6 +160,7 @@ def fetch_all(token: str, days: int = 30) -> dict[str, list[dict]]:
         "timebucket": (DS_TIMEBUCKET, {}),  # 全件(件数は少ない前提)
         "learning": (DS_LEARNING, _date_filter("日付", today - dt.timedelta(days=84))),
         "meals": (DS_MEAL, _date_filter("日付", since_recent)),
+        "meditation_recent": (DS_MEDITATION, _date_filter("日付", since_recent)),
         "thoughts_month": (DS_THOUGHT, {"filter": {
             "timestamp": "created_time",
             "created_time": {"on_or_after": f"{today.replace(day=1).isoformat()}T00:00:00+09:00"},

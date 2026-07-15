@@ -127,6 +127,20 @@ def fmt_pace(sec: float) -> str:
     return f"{int(sec // 60)}'{int(sec % 60):02d}\""
 
 
+def measured_minutes(page) -> float | None:
+    """「計測」date(開始〜終了)から分数を算出。未計測/計測中は None。"""
+    start, end = na.prop_date_range(page, "計測")
+    if not (start and end):
+        return None
+    try:
+        t0 = pd.to_datetime(start, utc=True)
+        t1 = pd.to_datetime(end, utc=True)
+        mins = (t1 - t0).total_seconds() / 60
+        return round(mins, 1) if 0 < mins < 24 * 60 else None  # 異常値ガード
+    except Exception:
+        return None
+
+
 def parse_wake_min(text):
     """ISO日時('...T06:45:00+09:00') や '6:45' から 深夜0時基準の分。失敗時 None。"""
     import re
@@ -153,6 +167,19 @@ def streak_from(dates: set, today: dt.date) -> int:
         n += 1
         d -= dt.timedelta(days=1)
     return n
+
+
+def comeback_stats(dates: set, today: dt.date) -> dict:
+    """習慣の復帰力: 途切れ(ブランク)の回数と平均日数。"""
+    if len(dates) < 2:
+        return {"n": 0, "avg": None, "max": 0}
+    seq = sorted(dates)
+    gaps = [(b - a).days - 1 for a, b in zip(seq, seq[1:]) if (b - a).days > 1]
+    return {
+        "n": len(gaps),
+        "avg": sum(gaps) / len(gaps) if gaps else None,
+        "max": max(gaps) if gaps else 0,
+    }
 
 
 def signal_badge(label: str, value) -> str:
@@ -380,8 +407,17 @@ if not at_df.empty:
 task_done_by_day = {d: done for d, (tot, done) in _task_daily.items() if tot > 0}
 
 # 瞑想実施の判定は瞑想記録DBの日付を正とする(コンディションのリレーション非依存)
-if _all_med_dates:
-    med_dates = _all_med_dates
+# 当日〜直近は5分キャッシュ側(meditation_recent)で鮮度を確保し、全期間と合算する
+_recent_med_dates, _recent_med_min = set(), {}
+for p in data.get("meditation_recent", []):
+    d = na.prop_date(p, "日付")
+    if d:
+        d = _to_date(d)
+        _recent_med_dates.add(d)
+        _recent_med_min[d] = _recent_med_min.get(d, 0.0) + (na.prop_number(p, "時間") or 0.0)
+if _all_med_dates or _recent_med_dates:
+    med_dates = _all_med_dates | _recent_med_dates
+    med_min_by_day.update(_recent_med_min)  # 直近分は新しい値で上書き
 
 TOTALS = {
     "log": (len(_all_log_dates), longest_streak(_all_log_dates)),
@@ -425,6 +461,39 @@ def render_today():
     if is_today and latest["フィードバック"]:
         st.caption(f"💬 {latest['フィードバック']}")
 
+    # ---- 今日の免責(悪い日にだけ現れる) ----
+    now_hour = dt.datetime.now(JST).hour
+    tasks_ = data["tasks_today"]
+    n_total_ = len(tasks_)
+    n_open_ = sum(1 for t in tasks_ if na.prop_status(t, "ステータス") in TASK_OPEN)
+    low_rate_evening = (now_hour >= 18 and n_total_ > 0
+                        and (n_total_ - n_open_) / n_total_ < 0.5)
+    bad_day = mode in ("回復日", "要注意")
+
+    if bad_day or low_rate_evening:
+        RECOVERY_MSGS = [
+            "今日は消化率よりも、回復が仕事。",
+            "嵐は過ぎるのを待てばいい。 —— 2024年の自分より",
+            "芯は安定し、状況をうまく乗りこなす。休むのも乗りこなし方のひとつ(Like Bamboo)",
+            "ボロボロより、元気でいるほうがずっといい。 —— 早紀の言葉より",
+        ]
+        TASK_MSGS = [
+            "未実施は失敗ではなく、「やらない」という判断。",
+            "努力とは、恐れから逃げる自己追い込みではなく、価値に向かう一歩(9つの概念より)",
+            "完璧な日である必要はない。明日も棒が並べば、それが成果。",
+            "成功とは、価値観に沿って動いている時間が増えていくこと。今日の数字ではない。",
+        ]
+        import random
+        pool = RECOVERY_MSGS if bad_day else TASK_MSGS
+        msg = random.Random(today.toordinal() + 11).choice(pool)
+        st.markdown(
+            f"<div style='padding:0.9rem 1.2rem;border-radius:12px;"
+            f"background:#3B82F615;border:1px solid #3B82F6;margin-top:0.4rem'>"
+            f"<div style='color:#3B82F6;font-size:0.72rem;font-weight:700'>"
+            f"🕊️ 今日の免責</div>"
+            f"<div style='font-size:1.05rem;margin-top:0.25rem'>{msg}</div></div>",
+            unsafe_allow_html=True)
+
     # ---- 今日のチェックボード ----
     learn_dates = set()
     for p in data.get("learning", []):
@@ -460,7 +529,14 @@ def render_today():
                 f"<div style='font-size:0.78rem;font-weight:700;color:#22C55E'>"
                 f"{name} ✓</div></div></a>")
         elif core:
-            nudge = (f"🔥{streak}→{streak + 1}" if streak else "今日から")
+            if streak:
+                nudge = f"🔥{streak}→{streak + 1}"
+            else:
+                cb = comeback_stats(
+                    log_dates if name == "日次ログ" else
+                    med_dates if name == "瞑想" else stretch_dates, today)
+                nudge = (f"平均{cb['avg']:.1f}日で復帰してきた"
+                         if cb["avg"] else "今日から")
             html = (
                 f"<a href='{url}' target='_blank' style='text-decoration:none'>"
                 f"<div style='text-align:center;padding:0.65rem 0.2rem;border-radius:14px;"
@@ -547,7 +623,10 @@ def render_today():
         must_due = [t for t in data["tasks_must_due"]
                     if na.prop_status(t, "ステータス") in TASK_OPEN]
         if n_total:
-            st.metric("残り", f"{n_open} / {n_total}")
+            pomo_today = sum(na.prop_number(t, "ポモ数") or 0 for t in tasks)
+            m_a, m_b = st.columns(2)
+            m_a.metric("残り", f"{n_open} / {n_total}")
+            m_b.metric("🍅 ポモ", f"{pomo_today:.0f}")
             st.progress((n_total - n_open) / n_total)
         else:
             st.info("今日のタスクは未生成です")
@@ -836,6 +915,42 @@ def render_condition():
         st.caption("🌅 起床時間の記録が貯まると、起床時刻別のタスク処理が表示されます")
     st.caption("※ いずれも相関の観察(忙しい日はタスクが多く消化率が下がる等、母数の影響に注意)")
 
+    # ---- ポモドーロ(30日) ----
+    st.divider()
+    st.markdown("#### 🍅 ポモドーロ(30日)")
+    pomo_rows = []
+    for p in alltime.get("tasks_30d", []):
+        n_pomo = na.prop_number(p, "ポモ数")
+        if not n_pomo:
+            continue
+        d = na.prop_date(p, "実行日時")
+        if not d:
+            continue
+        pomo_rows.append({"date": _to_date(d), "pomo": n_pomo,
+                          "min": na.prop_formula_number(p, "実績")})
+    if pomo_rows:
+        pdf_ = pd.DataFrame(pomo_rows)
+        daily_pomo = pdf_.groupby("date")["pomo"].sum()
+        total_pomo = int(pdf_["pomo"].sum())
+        withmin = pdf_.dropna(subset=["min"])
+        cyc = (withmin["min"].sum() / withmin["pomo"].sum()) if len(withmin) else None
+        q1, q2, q3 = st.columns(3)
+        q1.metric("30日合計", f"{total_pomo} 🍅")
+        q2.metric("実施日の平均", f"{daily_pomo.mean():.1f} 🍅/日")
+        if cyc:
+            state = ("✅ 健全" if 25 <= cyc <= 35 else
+                     "⚠️ 休憩スキップ気味" if cyc < 25 else "⚠️ ぶっ通し気味")
+            q3.metric("平均サイクル長", f"{cyc:.0f} 分/🍅", state, delta_color="off")
+        fig = go.Figure(go.Bar(x=daily_pomo.index, y=daily_pomo.values,
+                               marker_color="#EF4444"))
+        fig.update_layout(height=220, margin=dict(l=10, r=10, t=10, b=10),
+                          yaxis_title="🍅/日")
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("サイクル長=計測実績÷ポモ数。25〜35分なら「25分作業+5分休憩」のリズムが守れている目安。"
+                   "40分超はぶっ通しのサイン、意識的に席を立つ休憩を")
+    else:
+        st.info("タスク終了時に「ポモ数」を記入すると、ここにリズム分析が表示されます")
+
     # ---- 信号別タスク消化率(モード運用の監査) ----
     st.divider()
     st.markdown("#### 🚥 信号別タスク消化率(30日)")
@@ -996,7 +1111,9 @@ def render_goals():
             {
                 "date": na.prop_date(p, "日付"),
                 "種別": na.prop_select(p, "種別") or "その他",
-                "分": na.prop_number(p, "時間_分") or 0.0,
+                "分": (na.prop_number(p, "時間_分")
+                       if na.prop_number(p, "時間_分") is not None
+                       else measured_minutes(p)) or 0.0,
                 "量": na.prop_number(p, "量"),
                 "単位": na.prop_select(p, "量単位"),
             }
@@ -1225,6 +1342,25 @@ def render_habits():
         st.markdown(heat_row(label.split(" ")[1], last30, dates, color),
                     unsafe_allow_html=True)
     st.caption("左が30日前、右が今日")
+
+    # ---- 復帰力(レジリエンス) ----
+    st.divider()
+    st.markdown("#### 🔄 復帰力 — 途切れても、戻ってきた回数")
+    rows_cb = []
+    for label, dates in [("📝 日次ログ", _all_log_dates), ("🧘 瞑想", _all_med_dates)]:
+        cb = comeback_stats(dates, today)
+        if cb["n"]:
+            rows_cb.append((label, cb))
+    if rows_cb:
+        cols = st.columns(len(rows_cb))
+        for c, (label, cb) in zip(cols, rows_cb):
+            c.metric(f"{label} 復帰回数", f"{cb['n']} 回",
+                     f"平均 {cb['avg']:.1f} 日で復帰(最長 {cb['max']} 日)",
+                     delta_color="off")
+        st.caption("途切れた回数 = 戻ってきた回数。ストリークが切れることより、"
+                   "何度でも戻れることの方が長期では効く")
+    else:
+        st.caption("🔄 復帰力: まだ途切れの記録なし(=完走中)")
 
     # ---- 日別の瞑想分数(30日) ----
     if med_min_by_day:
