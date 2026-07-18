@@ -1106,7 +1106,8 @@ def render_goals():
         st.markdown(linked_header("🇬🇧 英語学習(週目標 7時間)", URL_LEARNING_DB),
                     unsafe_allow_html=True)
         TYPE_COLOR = {"リスニング": "#3B82F6", "スピーキング": "#22C55E",
-                      "ライティング": "#F97316", "Anki": "#A78BFA", "その他": "#6B7280"}
+                      "ライティング": "#F97316", "リーディング": "#14B8A6",
+                      "Anki": "#A78BFA", "その他": "#6B7280"}
         learn = pd.DataFrame([
             {
                 "date": na.prop_date(p, "日付"),
@@ -1116,6 +1117,7 @@ def render_goals():
                        else measured_minutes(p)) or 0.0,
                 "量": na.prop_number(p, "量"),
                 "単位": na.prop_select(p, "量単位"),
+                "コメント": na.prop_rich_text(p, "成長コメント").strip(),
             }
             for p in data.get("learning", []) if na.prop_date(p, "日付")
         ])
@@ -1148,7 +1150,8 @@ def render_goals():
             pivot = wk.pivot_table(index="week", columns="種別", values="分",
                                    aggfunc="sum").fillna(0)
             fig = go.Figure()
-            for t in ["リスニング", "スピーキング", "ライティング", "Anki", "その他"]:
+            for t in ["リスニング", "スピーキング", "ライティング", "リーディング",
+                      "Anki", "その他"]:
                 if t in pivot.columns:
                     fig.add_trace(go.Bar(x=pivot.index, y=pivot[t], name=t,
                                          marker_color=TYPE_COLOR[t]))
@@ -1158,6 +1161,48 @@ def render_goals():
                               margin=dict(l=10, r=10, t=10, b=10),
                               legend=dict(orientation="h", y=1.12))
             st.plotly_chart(fig, use_container_width=True)
+
+            # ---- 累計学習時間と成長コメント ----
+            st.markdown("##### 🏔️ 累計学習時間 — ⭐は成長を実感した日")
+            daily_min = learn.groupby("date")["分"].sum().sort_index()
+            cum = (daily_min.cumsum() / 60).reset_index()
+            cum.columns = ["date", "h"]
+            figc = go.Figure()
+            figc.add_trace(go.Scatter(
+                x=cum["date"], y=cum["h"], mode="lines",
+                line=dict(color="#EAB308", width=3), fill="tozeroy",
+                hovertext=[f"{r['date']}<br>累計 {r['h']:.1f} h"
+                           for _, r in cum.iterrows()],
+                hoverinfo="text", name="累計時間"))
+            cmts = learn[learn["コメント"] != ""].copy()
+            if not cmts.empty:
+                cum_map = dict(zip(cum["date"], cum["h"]))
+                cmts["h"] = cmts["date"].map(cum_map)
+                figc.add_trace(go.Scatter(
+                    x=cmts["date"], y=cmts["h"], mode="markers",
+                    marker=dict(size=13, color="#EAB308", symbol="star",
+                                line=dict(color="#fff", width=1)),
+                    hovertext=[
+                        f"<b>{r['date']} ({r['種別']})</b><br>💬 "
+                        + (r["コメント"][:120] + "…" if len(r["コメント"]) > 120
+                           else r["コメント"])
+                        for _, r in cmts.iterrows()],
+                    hoverinfo="text", name="成長コメント"))
+            figc.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10),
+                               legend=dict(orientation="h", y=1.14),
+                               yaxis_title="累計時間 (h)")
+            st.plotly_chart(figc, use_container_width=True)
+            if not cmts.empty:
+                last_c = cmts.sort_values("date").iloc[-1]
+                st.markdown(
+                    f"<div style='padding:0.7rem 1rem;border-radius:12px;background:#161B22;"
+                    f"border-left:4px solid #EAB308'>"
+                    f"<div style='color:#9CA3AF;font-size:0.75rem'>"
+                    f"直近の成長実感 — {last_c['date']} ({last_c['種別']})</div>"
+                    f"<div style='margin-top:0.2rem'>{last_c['コメント']}</div></div>",
+                    unsafe_allow_html=True)
+            else:
+                st.caption("「成長コメント」に実感を書いた日が ⭐ として線の上に残ります")
 
         # ---- 多読: 累計語数(KPI) ----
         st.markdown(f"##### 📚 多読 累計語数 [多読記録↗]({URL_TADOKU_DB})")
@@ -1224,7 +1269,8 @@ def render_goals():
             q1, q2, _sp = st.columns(3)
             q1.metric("Anki 復習(7日)", f"{anki_wk['量'].sum():.0f} 枚")
             q2.metric("レッスン(28日)", f"{lessons['量'].sum():.0f} 回")
-        st.caption("※ 多読は時間の記録がないため週7時間には含まれません(語数で管理)")
+        st.caption("※ リーディングの時間は学習記録(開始/終了ボタン計測)で週7時間に含まれます。"
+                   "語数は多読記録DBで管理(読了時に入力)")
 
     with tab_bucket:
         URL_BUCKET_DB = "https://app.notion.com/p/1ca6e5b9ef1080489650cdbdb9e9cb99"
