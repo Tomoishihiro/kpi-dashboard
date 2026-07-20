@@ -16,7 +16,7 @@ import sys
 import requests
 
 # ==== 設定 ====
-PARENT_PAGE_ID = "ここに親ページのIDを貼る"  # NotionページURL末尾の32桁(ハイフン無しでも可)
+DS_REVIEW = "160f1307-aead-48e0-88ab-042ced358cf4"  # 週次レビューDB(自動生成の溜め先)
 
 JST = dt.timezone(dt.timedelta(hours=9))
 NOTION_BASE = "https://api.notion.com/v1"
@@ -267,9 +267,12 @@ def main():
 
     # ---- ページ作成 ----
     r = requests.post(f"{NOTION_BASE}/pages", headers=headers(), json={
-        "parent": {"type": "page_id", "page_id": PARENT_PAGE_ID.replace("-", "")},
-        "properties": {"title": {"title": [
-            {"text": {"content": f"週次レビュー {week_start.strftime('%Y-%m-%d')}"}}]}},
+        "parent": {"type": "data_source_id", "data_source_id": DS_REVIEW},
+        "properties": {
+            "名前": {"title": [
+                {"text": {"content": f"週次レビュー {week_start.strftime('%Y-%m-%d')}"}}]},
+            "週": {"date": {"start": week_start.isoformat()}},
+        },
         "children": blocks[:100],
     }, timeout=60)
     r.raise_for_status()
@@ -277,7 +280,4 @@ def main():
 
 
 if __name__ == "__main__":
-    if "ここに" in PARENT_PAGE_ID:
-        print("PARENT_PAGE_ID を設定してください(スクリプト冒頭)")
-        sys.exit(1)
     main()
