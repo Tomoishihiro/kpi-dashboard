@@ -1,0 +1,19 @@
+name: Weekly review generator
+
+on:
+  schedule:
+    - cron: "0 22 * * 6"   # 日曜 7:00 JST (土曜 22:00 UTC)
+  workflow_dispatch: {}
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - run: python scripts/weekly_review_gen.py
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
