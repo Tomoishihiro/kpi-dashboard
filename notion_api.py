@@ -196,7 +196,7 @@ def fetch_alltime(token: str) -> dict[str, list[dict]]:
 
     呼び出し側で長め(1時間)にキャッシュする前提。
     """
-    since30 = dt.datetime.now(JST).date() - dt.timedelta(days=30)
+    since90 = dt.datetime.now(JST).date() - dt.timedelta(days=90)
     jobs = {
         "condition_all": (DS_CONDITION, {"sorts": [{"property": "日付", "direction": "ascending"}]}),
         "daily_all": (DS_DAILY_LOG, {"sorts": [{"property": "日付", "direction": "ascending"}]}),
@@ -207,9 +207,10 @@ def fetch_alltime(token: str) -> dict[str, list[dict]]:
         "compass_all": (DS_COMPASS, {"sorts": [{"property": "順序", "direction": "ascending"}]}),
         "autothought_all": (DS_AUTOTHOUGHT, {"sorts": [{"property": "発生日時", "direction": "ascending"}]}),
         "life_all": (DS_LIFE, {"sorts": [{"property": "時期", "direction": "ascending"}]}),
+        # キー名は互換のため据え置き。取得は90日(累計グラフ用。30日表示側はapp.pyでフィルタ)
         "tasks_30d": (DS_TASK, {"filter": {
             "property": "実行日時",
-            "date": {"on_or_after": f"{since30.isoformat()}T00:00:00+09:00"},
+            "date": {"on_or_after": f"{since90.isoformat()}T00:00:00+09:00"},
         }}),
     }
     out: dict[str, list[dict]] = {}

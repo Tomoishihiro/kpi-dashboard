@@ -406,6 +406,22 @@ if not at_df.empty:
     at_df = at_df.sort_values("date")
 task_done_by_day = {d: done for d, (tot, done) in _task_daily.items() if tot > 0}
 
+# 今週 vs 先週同時点のタスク比較(モチベーション指標)
+_wk_start = today - dt.timedelta(days=today.weekday())
+_lw_start = _wk_start - dt.timedelta(days=7)
+_lw_until = _lw_start + (today - _wk_start)  # 先週の「同じ曜日」まで
+
+
+def _week_task_sum(start, until):
+    done = sum(d2 for d, (t2, d2) in _task_daily.items() if start <= d <= until)
+    tot = sum(t2 for d, (t2, d2) in _task_daily.items() if start <= d <= until)
+    return tot, done
+
+
+TW_TOT, TW_DONE = _week_task_sum(_wk_start, today)
+LW_TOT_SAME, LW_DONE_SAME = _week_task_sum(_lw_start, _lw_until)
+LW_TOT_FULL, LW_DONE_FULL = _week_task_sum(_lw_start, _lw_start + dt.timedelta(days=6))
+
 # 瞑想実施の判定は瞑想記録DBの日付を正とする(コンディションのリレーション非依存)
 # 当日〜直近は5分キャッシュ側(meditation_recent)で鮮度を確保し、全期間と合算する
 _recent_med_dates, _recent_med_min = set(), {}
@@ -628,6 +644,10 @@ def render_today():
             m_a.metric("残り", f"{n_open} / {n_total}")
             m_b.metric("🍅 ポモ", f"{pomo_today:.0f}")
             st.progress((n_total - n_open) / n_total)
+            diff = TW_DONE - LW_DONE_SAME
+            race = ("先週の今頃と同じペース" if diff == 0 else
+                    f"先週の今頃より {diff:+d} 件")
+            st.caption(f"今週の完了 ✓{TW_DONE} 件 — {race}")
         else:
             st.info("今日のタスクは未生成です")
         if must_due:
@@ -926,6 +946,8 @@ def render_condition():
         d = na.prop_date(p, "実行日時")
         if not d:
             continue
+        if _to_date(d) < today - dt.timedelta(days=30):
+            continue  # 取得は90日だがこのパネルは30日表示
         pomo_rows.append({"date": _to_date(d), "pomo": n_pomo,
                           "min": na.prop_formula_number(p, "実績")})
     if pomo_rows:
@@ -1584,6 +1606,62 @@ def render_growth():
                                        fill="tozeroy"))
             fig.update_layout(height=230, margin=dict(l=10, r=10, t=10, b=10))
             st.plotly_chart(fig, use_container_width=True)
+
+    # --- タスクの積み上げ(90日) ---
+    st.divider()
+    st.markdown("#### 📋 タスクの積み上げ")
+    if _task_daily:
+        done_by_day = pd.Series(task_done_by_day).sort_index()
+        total_done = int(done_by_day.sum())
+        t1, t2, t3 = st.columns(3)
+        t1.metric("完了タスク(90日)", f"{total_done} 件")
+        t2.metric("今週の完了", f"{TW_DONE} 件",
+                  f"{TW_DONE - LW_DONE_SAME:+d} vs 先週同時点", delta_color="normal")
+        tw_rate = TW_DONE / TW_TOT * 100 if TW_TOT else None
+        lw_rate = LW_DONE_FULL / LW_TOT_FULL * 100 if LW_TOT_FULL else None
+        if tw_rate is not None:
+            t3.metric("今週の完了率", f"{tw_rate:.0f}%",
+                      f"{tw_rate - lw_rate:+.0f}pt vs 先週" if lw_rate else None,
+                      delta_color="normal")
+
+        # 累計完了の面グラフ(絶対に減らない線)
+        cum_done = done_by_day.cumsum().reset_index()
+        cum_done.columns = ["date", "cum"]
+        fig = go.Figure(go.Scatter(
+            x=cum_done["date"], y=cum_done["cum"], mode="lines",
+            line=dict(color="#22C55E", width=3), fill="tozeroy",
+            hovertext=[f"{r['date']}<br>累計 {r['cum']:.0f} 件"
+                       for _, r in cum_done.iterrows()],
+            hoverinfo="text"))
+        fig.update_layout(height=240, margin=dict(l=10, r=10, t=10, b=10),
+                          yaxis_title="累計完了 (件)")
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("この線は絶対に下がらない。片づけた一つひとつが積もっていく")
+
+        # 今週のジャンル内訳(完了のみ)
+        genre = {}
+        for p in alltime.get("tasks_30d", []):
+            d = na.prop_date(p, "実行日時")
+            if not d or _to_date(d) < _wk_start:
+                continue
+            if na.prop_status(p, "ステータス") in TASK_OPEN:
+                continue
+            g = na.prop_select(p, "ジャンル") or "未分類"
+            genre[g] = genre.get(g, 0) + 1
+        if genre:
+            gs = sorted(genre.items(), key=lambda x: -x[1])
+            figg = go.Figure(go.Bar(
+                x=[v for _, v in gs], y=[k for k, _ in gs],
+                orientation="h", marker_color="#3B82F6",
+                text=[f"{v}件" for _, v in gs], textposition="outside"))
+            figg.update_layout(height=max(160, 40 * len(gs)),
+                               margin=dict(l=10, r=10, t=26, b=10),
+                               title=dict(text="今週なにを片づけたか(ジャンル別)",
+                                          font=dict(size=13)),
+                               xaxis=dict(range=[0, max(v for _, v in gs) * 1.25]))
+            st.plotly_chart(figg, use_container_width=True)
+    else:
+        st.info("タスクの実行データが貯まると表示されます")
 
     # --- 長期の身体トレンド(7日移動平均) ---
     st.divider()
