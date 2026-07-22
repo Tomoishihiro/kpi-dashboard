@@ -662,19 +662,24 @@ def render_today():
 
         # ---- タスクの積み上げ(コンパクト) ----
         if _task_daily:
-            done_by_day = pd.Series(task_done_by_day)
-            done_by_day.index = pd.to_datetime(done_by_day.index)  # 日付軸を明示
-            done_by_day = done_by_day.sort_index()
-            total_done = int(done_by_day.sum())
-            cum = done_by_day.cumsum()
+            # 日付キーのみ採用し(異常キーの混入を遮断)、文字列ラベルの
+            # カテゴリ軸で描画(環境のdate型解釈差の影響を受けない)
+            pairs = sorted((d, v) for d, v in task_done_by_day.items()
+                           if isinstance(d, dt.date))
+            total_done = int(sum(v for _, v in pairs))
+            cum_vals, acc = [], 0
+            for _, v in pairs:
+                acc += v
+                cum_vals.append(acc)
+            x_labels = [d.strftime("%m/%d") for d, _ in pairs]
             fig = go.Figure(go.Scatter(
-                x=cum.index, y=cum.values, mode="lines",
+                x=x_labels, y=cum_vals, mode="lines",
                 line=dict(color="#22C55E", width=2.5), fill="tozeroy",
-                hovertext=[f"{d.date()}<br>累計 {v:.0f} 件"
-                           for d, v in cum.items()],
+                hovertext=[f"{d}<br>累計 {v} 件"
+                           for (d, _), v in zip(pairs, cum_vals)],
                 hoverinfo="text"))
             fig.update_layout(height=150, margin=dict(l=6, r=6, t=4, b=4),
-                              xaxis=dict(type="date", tickformat="%m/%d"),
+                              xaxis=dict(type="category", nticks=5),
                               yaxis=dict(showticklabels=True))
             st.plotly_chart(fig, use_container_width=True)
             tw_rate = TW_DONE / TW_TOT * 100 if TW_TOT else None
@@ -701,11 +706,11 @@ def render_today():
                 figg = go.Figure(go.Bar(
                     x=[v for _, v in gs], y=[k for k, _ in gs],
                     orientation="h", marker_color="#3B82F6",
-                    text=[f"{v}" for _, v in gs], textposition="outside"))
-                figg.update_layout(height=max(120, 32 * len(gs)),
-                                   margin=dict(l=6, r=6, t=4, b=4),
-                                   xaxis=dict(range=[0, max(v for _, v in gs) * 1.3],
-                                              showticklabels=False))
+                    text=[f"{v}件" for _, v in gs], textposition="auto"))
+                figg.update_layout(height=60 + 34 * len(gs),
+                                   margin=dict(l=6, r=6, t=6, b=6),
+                                   xaxis=dict(showticklabels=False),
+                                   yaxis=dict(autorange="reversed"))
                 st.plotly_chart(figg, use_container_width=True)
                 st.caption("今週なにを片づけたか(ジャンル別)")
 
