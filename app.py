@@ -662,17 +662,19 @@ def render_today():
 
         # ---- タスクの積み上げ(コンパクト) ----
         if _task_daily:
-            done_by_day = pd.Series(task_done_by_day).sort_index()
+            done_by_day = pd.Series(task_done_by_day)
+            done_by_day.index = pd.to_datetime(done_by_day.index)  # 日付軸を明示
+            done_by_day = done_by_day.sort_index()
             total_done = int(done_by_day.sum())
-            cum_done = done_by_day.cumsum().reset_index()
-            cum_done.columns = ["date", "cum"]
+            cum = done_by_day.cumsum()
             fig = go.Figure(go.Scatter(
-                x=cum_done["date"], y=cum_done["cum"], mode="lines",
+                x=cum.index, y=cum.values, mode="lines",
                 line=dict(color="#22C55E", width=2.5), fill="tozeroy",
-                hovertext=[f"{r['date']}<br>累計 {r['cum']:.0f} 件"
-                           for _, r in cum_done.iterrows()],
+                hovertext=[f"{d.date()}<br>累計 {v:.0f} 件"
+                           for d, v in cum.items()],
                 hoverinfo="text"))
             fig.update_layout(height=150, margin=dict(l=6, r=6, t=4, b=4),
+                              xaxis=dict(type="date", tickformat="%m/%d"),
                               yaxis=dict(showticklabels=True))
             st.plotly_chart(fig, use_container_width=True)
             tw_rate = TW_DONE / TW_TOT * 100 if TW_TOT else None
