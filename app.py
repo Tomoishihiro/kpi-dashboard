@@ -43,7 +43,20 @@ GOAL_START = dt.date(2026, 1, 1)   # 計画ライン・対計画計算の起点(
 GOAL_END = dt.date(2026, 12, 31)
 WAIST_GOAL = 76.0  # 腹囲目標 cm
 
+# 栄養目標(1日あたり) {表示名: (目標値g, 少ないほど良いか)}
+NUTRI_GOALS = {
+    "飽和脂肪酸": (16.0, True),
+    "脂質": (65.0, True),
+    "タンパク質": (90.0, False),
+    "繊維": (30.0, False),
+}
+NUTRI_COLOR = {"飽和脂肪酸": "#EF4444", "脂質": "#F97316",
+               "タンパク質": "#3B82F6", "繊維": "#22C55E"}
+
 TASK_OPEN = {"未着手", "進行中", "中断"}
+# ステータスは 中断/未着手/進行中/未実施/完了 の5種。
+# 「未実施」は"やらなかった"= 未消化。残りにも完了にも入れず、分母にだけ残す。
+TASK_DONE = {"完了"}
 
 # クリックで飛ぶNotionページ
 URL_TASK_PAGE = "https://app.notion.com/p/1c36e5b9ef1080df9268f55870ef3ae4"   # ✅ タスク管理
@@ -52,6 +65,7 @@ URL_RUN_DB = "https://app.notion.com/p/b3f7d01fea0349b58bedd56d7df58fb4"      # 
 URL_DAILY_DB = "https://app.notion.com/p/44f2b9e428fe48749d4b4bb5ce66e51f"    # 日次ログDB
 URL_MED_DB = "https://app.notion.com/p/1f06e5b9ef1080868d9be79a2fe00ab6"      # 瞑想記録DB
 URL_COND_DB = "https://app.notion.com/p/0c718e4a65d64b95bcc192ecb9106b70"     # コンディション記録DB
+URL_STRENGTH_DB = "https://app.notion.com/p/5b8903881e814c7e8f7ea1c1d4067976"  # 💪 筋トレ記録DB
 
 
 def linked_header(title: str, url: str) -> str:
@@ -169,6 +183,24 @@ def streak_from(dates: set, today: dt.date) -> int:
     return n
 
 
+def week_start_of(d: dt.date) -> dt.date:
+    """その日が属する週(月曜起点)の月曜日を返す。"""
+    return d - dt.timedelta(days=d.weekday())
+
+
+def weekly_streak(dates: set, today: dt.date) -> int:
+    """週1習慣の連続週数。今週未実施なら先週から遡って数える。"""
+    weeks = {week_start_of(d) for d in dates}
+    cur = week_start_of(today)
+    if cur not in weeks:
+        cur -= dt.timedelta(days=7)
+    n = 0
+    while cur in weeks:
+        n += 1
+        cur -= dt.timedelta(days=7)
+    return n
+
+
 def comeback_stats(dates: set, today: dt.date) -> dict:
     """習慣の復帰力: 途切れ(ブランク)の回数と平均日数。"""
     if len(dates) < 2:
@@ -279,7 +311,9 @@ if not logs.empty:
 meals = pd.DataFrame([
     {
         "date": na.prop_date(p, "日付"),
+        "飽和脂肪酸": na.prop_number(p, "飽和脂肪酸_g"),
         "脂質": na.prop_number(p, "脂質_g"),
+        "タンパク質": na.prop_number(p, "タンパク質_g"),
         "繊維": na.prop_number(p, "食物繊維_g"),
         "塩分": na.prop_number(p, "食塩相当量_g"),
         "スコア": na.prop_number(p, "健康スコア"),
@@ -292,6 +326,33 @@ if not meals.empty:
     meals["date"] = to_jst_date(meals["date"])
     meals = meals.sort_values("date")
 drink_dates = set(meals[meals["飲酒"]]["date"]) if not meals.empty else set()
+
+# ---- 筋トレ: 末尾が _回 / _秒 / _kg の数値プロパティを種目として自動検出 ----
+STRENGTH_SUFFIX = ("_回", "_秒", "_kg")
+strength_cols: list[str] = []
+_st_rows = []
+for p in data.get("strength", []):
+    if not na.prop_date(p, "日付"):
+        continue
+    row = {"date": na.prop_date(p, "日付"),
+           "セット数": na.prop_number(p, "セット数"),
+           "メモ": na.prop_rich_text(p, "メモ")}
+    for pname, pval in (p.get("properties") or {}).items():
+        if pval.get("type") == "number" and pname.endswith(STRENGTH_SUFFIX):
+            row[pname] = pval.get("number")
+            if pname not in strength_cols:
+                strength_cols.append(pname)
+    _st_rows.append(row)
+strength_cols.sort()
+strength = pd.DataFrame(_st_rows)
+if not strength.empty:
+    strength["date"] = to_jst_date(strength["date"])
+    strength = strength.sort_values("date").reset_index(drop=True)
+    for c in strength_cols:
+        strength[c] = pd.to_numeric(strength.get(c), errors="coerce")
+strength_dates = set(strength["date"]) if not strength.empty else set()
+gym_weeks = weekly_streak(strength_dates, today)
+gym_this_week = week_start_of(today) in {week_start_of(d) for d in strength_dates}
 
 log_dates = set(logs["date"]) if not logs.empty else set()
 stretch_dates = set(logs[logs["stretch"]]["date"]) if not logs.empty else set()
@@ -357,7 +418,7 @@ for p in alltime.get("tasks_30d", []):
         continue
     d = _to_date(exec_date)
     tot, done = _task_daily.get(d, (0, 0))
-    is_done = na.prop_status(p, "ステータス") not in TASK_OPEN
+    is_done = na.prop_status(p, "ステータス") in TASK_DONE
     _task_daily[d] = (tot + 1, done + (1 if is_done else 0))
 task_rate_by_day = {d: done / tot for d, (tot, done) in _task_daily.items() if tot > 0}
 
@@ -481,9 +542,9 @@ def render_today():
     now_hour = dt.datetime.now(JST).hour
     tasks_ = data["tasks_today"]
     n_total_ = len(tasks_)
-    n_open_ = sum(1 for t in tasks_ if na.prop_status(t, "ステータス") in TASK_OPEN)
+    n_done_ = sum(1 for t in tasks_ if na.prop_status(t, "ステータス") in TASK_DONE)
     low_rate_evening = (now_hour >= 18 and n_total_ > 0
-                        and (n_total_ - n_open_) / n_total_ < 0.5)
+                        and n_done_ / n_total_ < 0.5)
     bad_day = mode in ("回復日", "要注意")
 
     if bad_day or low_rate_evening:
@@ -529,6 +590,7 @@ def render_today():
          streak_from(stretch_dates, today), True),
         ("🎧", "学習", today in learn_dates, URL_LEARNING_DB, None, False),
         ("🏃", "ラン", run_today, URL_RUN_DB, None, False),
+        ("💪", "筋トレ", gym_this_week, URL_STRENGTH_DB, gym_weeks, False),
     ]
     core_done = sum(1 for _, _, done, *_ in tiles if done and _)
     core_total = sum(1 for t in tiles if t[5])
@@ -536,14 +598,17 @@ def render_today():
 
     cols = st.columns(len(tiles))
     for c, (emoji, name, done, url, streak, core) in zip(cols, tiles):
+        weekly = (name == "筋トレ")  # 週単位で判定するタイル
         if done:
+            extra = (f"<div style='font-size:0.7rem;color:#22C55E'>🔥{streak}週連続</div>"
+                     if weekly and streak else "")
             html = (
                 f"<a href='{url}' target='_blank' style='text-decoration:none'>"
                 f"<div style='text-align:center;padding:0.65rem 0.2rem;border-radius:14px;"
                 f"background:#22C55E22;border:2px solid #22C55E'>"
                 f"<div style='font-size:1.6rem'>{emoji}</div>"
                 f"<div style='font-size:0.78rem;font-weight:700;color:#22C55E'>"
-                f"{name} ✓</div></div></a>")
+                f"{name} {'今週✓' if weekly else '✓'}</div>{extra}</div></a>")
         elif core:
             if streak:
                 nudge = f"🔥{streak}→{streak + 1}"
@@ -561,19 +626,25 @@ def render_today():
                 f"<div style='font-size:0.78rem;color:#9CA3AF'>{name}</div>"
                 f"<div style='font-size:0.7rem;color:#EAB308'>{nudge}</div></div></a>")
         else:
+            border = "2px dashed #6B7280" if weekly else "1px solid #30363D"
+            nudge = ""
+            if weekly:
+                txt = f"今週まだ・🔥{streak}週" if streak else "今週まだ"
+                nudge = f"<div style='font-size:0.7rem;color:#EAB308'>{txt}</div>"
             html = (
                 f"<a href='{url}' target='_blank' style='text-decoration:none'>"
                 f"<div style='text-align:center;padding:0.65rem 0.2rem;border-radius:14px;"
-                f"background:#161B22;border:1px solid #30363D'>"
+                f"background:#161B22;border:{border}'>"
                 f"<div style='font-size:1.6rem;filter:grayscale(1);opacity:0.4'>{emoji}</div>"
-                f"<div style='font-size:0.78rem;color:#6B7280'>{name}</div></div></a>")
+                f"<div style='font-size:0.78rem;color:#6B7280'>{name}</div>"
+                f"{nudge}</div></a>")
         c.markdown(html, unsafe_allow_html=True)
 
     if core_done == core_total:
         st.caption(f"🎉 今日のコア習慣 {core_total}/{core_total} 完了。あとは自由時間")
     else:
         st.caption(f"コア習慣 {core_done}/{core_total} ・ タイルをタップで記録へ"
-                   "(🎧🏃は任意)")
+                   "(🎧🏃💪は任意)")
 
     st.divider()
     mid_l, mid_r = st.columns([2, 1])
@@ -640,10 +711,16 @@ def render_today():
                     if na.prop_status(t, "ステータス") in TASK_OPEN]
         if n_total:
             pomo_today = sum(na.prop_number(t, "ポモ数") or 0 for t in tasks)
+            n_done_today = sum(1 for t in tasks
+                               if na.prop_status(t, "ステータス") in TASK_DONE)
+            n_skip_today = n_total - n_open - n_done_today  # 未実施
             m_a, m_b = st.columns(2)
-            m_a.metric("残り", f"{n_open} / {n_total}")
+            m_a.metric("残り", f"{n_open} / {n_total}",
+                       f"✓完了 {n_done_today}", delta_color="off")
             m_b.metric("🍅 ポモ", f"{pomo_today:.0f}")
-            st.progress((n_total - n_open) / n_total)
+            st.progress(n_done_today / n_total)
+            if n_skip_today:
+                st.caption(f"未実施 {n_skip_today} 件(完了には数えず、消化率の分母には残る)")
             diff = TW_DONE - LW_DONE_SAME
             race = ("先週の今頃と同じペース" if diff == 0 else
                     f"先週の今頃より {diff:+d} 件")
@@ -697,7 +774,7 @@ def render_today():
                 d = na.prop_date(p, "実行日時")
                 if not d or _to_date(d) < _wk_start:
                     continue
-                if na.prop_status(p, "ステータス") in TASK_OPEN:
+                if na.prop_status(p, "ステータス") not in TASK_DONE:
                     continue
                 g = na.prop_select(p, "ジャンル") or "未分類"
                 genre[g] = genre.get(g, 0) + 1
@@ -1057,8 +1134,9 @@ def render_condition():
 
 # ================= 目標 =================
 def render_goals():
-    tab_run, tab_weight, tab_en, tab_bucket = st.tabs(
-        ["🏃 ランニング 100km", "⚖️ 体重・脂質改善", "🇬🇧 英語", "🪣 タイムバケット"])
+    tab_run, tab_weight, tab_gym, tab_en, tab_bucket = st.tabs(
+        ["🏃 ランニング 100km", "⚖️ 体重・脂質改善", "💪 筋トレ", "🇬🇧 英語",
+         "🪣 タイムバケット"])
 
     with tab_run:
         st.markdown(linked_header("🏃 ランニング記録", URL_RUN_DB), unsafe_allow_html=True)
@@ -1146,37 +1224,126 @@ def render_goals():
             # ---- 食事: LDL対策の先行指標 ----
             if not meals.empty:
                 st.divider()
-                st.markdown("##### 🥗 食事(LDL対策の先行指標・7日平均)")
+                st.markdown("##### 🥗 食事(7日平均 vs 1日あたり目標)")
                 half = today - dt.timedelta(days=7)
+                m30 = meals[meals["date"] > today - dt.timedelta(days=30)]
+
                 cols = st.columns(4)
-                for c, (name, unit, good_down) in zip(cols, [
-                        ("脂質", "g/日", True), ("繊維", "g/日", False),
-                        ("塩分", "g/日", True)]):
+                for c, name in zip(cols, NUTRI_GOALS):
+                    goal, down = NUTRI_GOALS[name]
+                    if name not in meals.columns:
+                        continue
                     recent = meals[meals["date"] > half][name].dropna()
-                    prev = meals[(meals["date"] <= half)][name].dropna()
-                    if len(recent) >= 3:
-                        d_txt = None
-                        if len(prev) >= 3:
-                            diff = recent.mean() - prev.mean()
-                            d_txt = f"{diff:+.1f} 前週比"
-                        c.metric(f"{name} ({unit})", f"{recent.mean():.1f}", d_txt,
-                                 delta_color="inverse" if good_down else "normal")
-                sc = meals.dropna(subset=["スコア"])
-                if not sc.empty:
-                    cols[3].metric("健康スコア(7日)",
-                                   f"{sc[sc['date'] > half]['スコア'].mean():.0f}"
-                                   if len(sc[sc["date"] > half]) else "—")
-                trend = meals.dropna(subset=["脂質", "繊維"]).copy()
-                if len(trend) >= 7:
-                    trend["脂質(7日平均)"] = trend["脂質"].rolling(7, min_periods=3).mean()
-                    trend["繊維(7日平均)"] = trend["繊維"].rolling(7, min_periods=3).mean()
-                    st.plotly_chart(
-                        line_fig(trend, {"脂質(7日平均)": "#F97316",
-                                         "繊維(7日平均)": "#22C55E"}, height=220),
-                        use_container_width=True)
-                    st.caption("狙い: 🟠脂質は下へ、🟢繊維は上へ(医師方針の実行度)")
+                    prev = meals[meals["date"] <= half][name].dropna()
+                    if len(recent) < 3:
+                        c.metric(f"{name} (g)", "—", f"目標 {goal:.0f}g",
+                                 delta_color="off")
+                        continue
+                    avg = recent.mean()
+                    ok = (avg <= goal) if down else (avg >= goal)
+                    c.metric(f"{'✅' if ok else '⚠️'} {name} (g)", f"{avg:.1f}",
+                             f"{avg - goal:+.1f} 目標比",
+                             delta_color="inverse" if down else "normal")
+                    line = f"目標 {goal:.0f}g"
+                    if len(prev) >= 3:
+                        line += f" / 前週比 {avg - prev.mean():+.1f}"
+                    hit = m30[name].dropna()
+                    if len(hit) >= 5:
+                        rate = ((hit <= goal) if down else (hit >= goal)).mean() * 100
+                        line += f" / 達成率 {rate:.0f}%(30日)"
+                    c.caption(line)
+
+                sub = st.columns(2)
+                salt = meals[meals["date"] > half]["塩分"].dropna()
+                if len(salt) >= 3:
+                    sub[0].metric("🧂 塩分 (g/日)", f"{salt.mean():.1f}")
+                sc = meals[meals["date"] > half]["スコア"].dropna()
+                if len(sc):
+                    sub[1].metric("健康スコア(7日)", f"{sc.mean():.0f}")
+
+                # 減らす指標 / 増やす指標 を目標線つきで
+                trend = meals.copy()
+                for grp, names, cap in [
+                        ("down", ["飽和脂肪酸", "脂質"],
+                         "狙い: 目標線より下をキープ(LDL対策の実行度)"),
+                        ("up", ["タンパク質", "繊維"],
+                         "狙い: 目標線より上をキープ(筋量と腸内環境)")]:
+                    use = [n for n in names if n in trend.columns
+                           and trend[n].notna().sum() >= 7]
+                    if not use:
+                        continue
+                    plot_cols = {}
+                    for n in use:
+                        trend[f"{n}(7日平均)"] = trend[n].rolling(7, min_periods=3).mean()
+                        plot_cols[f"{n}(7日平均)"] = NUTRI_COLOR[n]
+                    fig = line_fig(trend.dropna(subset=use, how="all"),
+                                   plot_cols, height=220)
+                    for n in use:
+                        fig.add_hline(y=NUTRI_GOALS[n][0],
+                                      line=dict(color=NUTRI_COLOR[n], width=1,
+                                                dash="dot"),
+                                      annotation_text=f"{n} 目標{NUTRI_GOALS[n][0]:.0f}g",
+                                      annotation_position="top left",
+                                      annotation_font_size=10)
+                    st.plotly_chart(fig, use_container_width=True)
+                    st.caption(cap)
         else:
             st.info("体重の記録がありません")
+
+    with tab_gym:
+        st.markdown(linked_header("💪 筋トレ(週1回・全身)", URL_STRENGTH_DB),
+                    unsafe_allow_html=True)
+        if strength.empty or not strength_cols:
+            st.info("まだ記録がありません。最初の1回を入れると、ここに種目別の伸びが出ます。\n\n"
+                    "回数は3セットの合計を入力(例: 10+10+8 → 28)")
+        else:
+            m = st.columns(4)
+            m[0].metric("今週", "実施済 ✓" if gym_this_week else "未実施",
+                        f"🔥 {gym_weeks} 週連続" if gym_weeks else None,
+                        delta_color="off")
+            m[1].metric("通算セッション", f"{len(strength)} 回")
+            last_d = strength["date"].iloc[-1]
+            m[2].metric("最終実施", last_d.strftime("%m/%d"),
+                        f"{(today - last_d).days} 日前", delta_color="off")
+
+            rep_cols = [c for c in strength_cols if c.endswith("_回")]
+            if rep_cols:
+                strength["総レップ"] = strength[rep_cols].sum(axis=1, min_count=1)
+                tot = strength.dropna(subset=["総レップ"])
+                if not tot.empty:
+                    cur_v = float(tot["総レップ"].iloc[-1])
+                    d_txt = (f"{cur_v - float(tot['総レップ'].iloc[-2]):+.0f} 前回比"
+                             if len(tot) >= 2 else None)
+                    m[3].metric("直近の総レップ", f"{cur_v:.0f} 回", d_txt)
+                    if len(tot) >= 2:
+                        st.plotly_chart(line_fig(tot, {"総レップ": "#22C55E"}, height=200),
+                                        use_container_width=True)
+                        st.caption("セッションの総レップ数(全種目合計)。"
+                                   "これが右肩上がりなら順調")
+
+            palette = ["#3B82F6", "#F97316", "#A78BFA", "#14B8A6",
+                       "#EAB308", "#EF4444", "#22C55E"]
+            for suffix, title in [("_回", "種目別の回数"), ("_秒", "種目別の秒数"),
+                                  ("_kg", "種目別の重量")]:
+                use = [c for c in strength_cols
+                       if c.endswith(suffix) and strength[c].notna().sum() >= 2]
+                if not use:
+                    continue
+                st.markdown(f"###### {title}")
+                st.plotly_chart(
+                    line_fig(strength,
+                             {c: palette[i % len(palette)] for i, c in enumerate(use)},
+                             height=240),
+                    use_container_width=True)
+
+            best = [(c, strength[c].max()) for c in strength_cols
+                    if strength[c].notna().any()]
+            if best:
+                st.caption("🏅 自己ベスト: " +
+                           " / ".join(f"{c} {v:.0f}" for c, v in best))
+            st.caption("伸ばし方: 全セットで上限回数に届いたら次の段階へ"
+                       "(膝つき→つま先プッシュアップ、スクワット→片脚寄り、"
+                       "プランク→+10秒)。回数が頭打ちでも段階が上がっていれば成長")
 
     with tab_en:
         st.markdown(linked_header("🇬🇧 英語学習(週目標 7時間)", URL_LEARNING_DB),
@@ -1464,6 +1631,24 @@ def render_habits():
         st.markdown(heat_row(label.split(" ")[1], last30, dates, color),
                     unsafe_allow_html=True)
     st.caption("左が30日前、右が今日")
+
+    # ---- 筋トレ(週1習慣) ----
+    st.divider()
+    st.markdown(f"#### 💪 筋トレ(週1回) — [記録DB]({URL_STRENGTH_DB})")
+    weeks12 = [week_start_of(today) - dt.timedelta(days=7 * i)
+               for i in range(11, -1, -1)]
+    done_weeks = {week_start_of(d) for d in strength_dates}
+    g1, g2 = st.columns([1, 2])
+    g1.metric("連続週数", f"{gym_weeks} 週",
+              f"12週で {sum(1 for w in weeks12 if w in done_weeks)}/12",
+              delta_color="off")
+    g2.markdown(
+        "".join(
+            "<span style='display:inline-block;width:20px;height:20px;margin:1px;"
+            f"border-radius:4px;background:{'#F59E0B' if w in done_weeks else '#21262D'}'"
+            "></span>" for w in weeks12),
+        unsafe_allow_html=True)
+    g2.caption("左が12週前、右が今週")
 
     # ---- 復帰力(レジリエンス) ----
     st.divider()

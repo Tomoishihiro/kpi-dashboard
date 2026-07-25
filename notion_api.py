@@ -31,6 +31,7 @@ DS_MEAL = "c286a9de-3db6-45ee-b055-cb8c21620601"        # 🍽️ 食事記録
 DS_COMPASS = "a5265eef-1a2a-476d-ab6b-74ef0c050b1f"     # 🧭 羅針盤
 DS_AUTOTHOUGHT = "24e6e5b9-ef10-8076-b744-000bffce049f" # 自動思考カウント
 DS_LIFE = "7fe65d82-39c1-44e5-8a97-74fb0eb4a6ab"        # 📖 ライフイベント
+DS_STRENGTH = "7f9f14dc-9ee2-4f7f-b9a8-21c6ab7107c8"    # 💪 筋トレ記録
 
 
 def _headers(token: str) -> dict:
@@ -175,6 +176,8 @@ def fetch_all(token: str, days: int = 30) -> dict[str, list[dict]]:
              "last_edited_time": {"on_or_after": f"{week_start.isoformat()}T00:00:00+09:00"}},
         ]}}),
         "actions_all": (DS_ACTION, {}),
+        # 筋トレは週1・低頻度なので全件取得(当日判定に使うため5分キャッシュ側)
+        "strength": (DS_STRENGTH, {"sorts": [{"property": "日付", "direction": "ascending"}]}),
     }
     out: dict[str, list[dict]] = {}
     errors: list[str] = []
