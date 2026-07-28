@@ -43,6 +43,11 @@ GOAL_START = dt.date(2026, 1, 1)   # 計画ライン・対計画計算の起点(
 GOAL_END = dt.date(2026, 12, 31)
 WAIST_GOAL = 76.0  # 腹囲目標 cm
 
+# ---- 故障予防(週間距離の増やしすぎ防止) ----
+RUN_CAP_RATIO = 1.10   # 増加の上限(前週比+10%)
+RUN_FLOOR_KM = 8.0     # 基準が小さい週でも、ここまでは許容(復帰・再開のための下駄)
+RUN_ACWR_HI = 1.5      # 直近4週平均に対する比率。これを超えると急増
+
 # 栄養目標(1日あたり) {表示名: (目標値g, 少ないほど良いか)}
 NUTRI_GOALS = {
     "飽和脂肪酸": (16.0, True),
@@ -1167,13 +1172,80 @@ def render_goals():
             wk = runs.copy()
             wk["week"] = pd.to_datetime(wk["date"]).dt.to_period("W").dt.start_time
             weekly = wk.groupby("week")["km"].sum().reset_index()
+            km_by_week = {d.date(): float(v)
+                          for d, v in zip(weekly["week"], weekly["km"])}
+
+            def run_cap(w: dt.date) -> tuple:
+                """その週の上限を返す -> (上限km, 前週km, 直近4週平均km)。
+
+                基準 = max(前週, 直近4週平均)。
+                前週がたまたま0でも4週平均が効くので、休んだ翌週に
+                走れる距離が不当に縮まらない。どちらも小さいときは
+                RUN_FLOOR_KM を下駄として使う。
+                """
+                prevs = [km_by_week.get(w - dt.timedelta(days=7 * i), 0.0)
+                         for i in range(1, 5)]
+                chronic = sum(prevs) / 4
+                base = max(prevs[0], chronic)
+                return max(base * RUN_CAP_RATIO, RUN_FLOOR_KM), prevs[0], chronic
+
+            this_wk = week_start_of(today)
+            cap, prev_km, chronic_km = run_cap(this_wk)
+            cur_km = km_by_week.get(this_wk, 0.0)
+
+            st.markdown("##### 🩹 故障予防(週間距離の増やしすぎ防止)")
+            r1, r2, r3, r4 = st.columns(4)
+            r1.metric("今週の距離", f"{cur_km:.1f} km")
+            r2.metric("今週の上限", f"{cap:.1f} km",
+                      f"残り {max(cap - cur_km, 0):.1f} km", delta_color="off")
+            r3.metric("前週", f"{prev_km:.1f} km")
+            r4.metric("直近4週平均", f"{chronic_km:.1f} km")
+
+            over = cur_km - cap
+            if over > 0:
+                st.error(f"⛔ 上限を {over:.1f} km 超過。"
+                         "今週はこれ以上距離を伸ばさず、"
+                         "走るならジョグかクロストレーニングに")
+            elif cap - cur_km < cap * 0.1:
+                st.warning(f"⚠️ 上限まで残り {cap - cur_km:.1f} km。"
+                           "ここから先は無理に足さない")
+            else:
+                st.success(f"✅ あと {cap - cur_km:.1f} km は安全圏")
+
+            # 基準の出どころを明示(なぜこの上限なのかが分かるように)
+            if prev_km >= chronic_km and prev_km * RUN_CAP_RATIO >= RUN_FLOOR_KM:
+                why = f"基準=前週 {prev_km:.1f}km の +10%"
+            elif chronic_km * RUN_CAP_RATIO >= RUN_FLOOR_KM:
+                why = (f"基準=直近4週平均 {chronic_km:.1f}km の +10% "
+                       f"(前週 {prev_km:.1f}km は少なかったため平均を採用)")
+            else:
+                why = f"基準が小さいため下限 {RUN_FLOOR_KM:.0f}km を適用(再開・復帰週)"
+            st.caption(why)
+
+            if chronic_km > 0:
+                acwr = cur_km / chronic_km
+                if acwr > RUN_ACWR_HI:
+                    st.caption(f"📈 直近4週平均比 {acwr:.2f}倍 — "
+                               "1週で急に増えている。翌週は据え置きが安全")
+                elif acwr < 0.8 and cur_km > 0:
+                    st.caption(f"📉 直近4週平均比 {acwr:.2f}倍 — 余裕あり")
+
             g1, g2 = st.columns([1, 1.2])
             with g1:
-                st.caption("週別距離 (km)")
-                st.plotly_chart(go.Figure(go.Bar(x=weekly["week"], y=weekly["km"],
-                                                 marker_color="#22C55E"))
-                                .update_layout(height=240, margin=dict(l=10, r=10, t=10, b=10)),
-                                use_container_width=True)
+                st.caption("週別距離 (km) — 点線が各週の上限")
+                seq = [this_wk - dt.timedelta(days=7 * i) for i in range(11, -1, -1)]
+                vals = [km_by_week.get(w, 0.0) for w in seq]
+                caps = [run_cap(w)[0] for w in seq]
+                colors = ["#EF4444" if v > c else "#22C55E"
+                          for v, c in zip(vals, caps)]
+                wfig = go.Figure()
+                wfig.add_trace(go.Bar(x=seq, y=vals, marker_color=colors, name="実績"))
+                wfig.add_trace(go.Scatter(x=seq, y=caps, mode="lines", name="上限",
+                                          line=dict(color="#EAB308", width=1,
+                                                    dash="dot")))
+                wfig.update_layout(height=240, margin=dict(l=10, r=10, t=10, b=10),
+                                   showlegend=False)
+                st.plotly_chart(wfig, use_container_width=True)
             with g2:
                 st.caption("直近のラン")
                 show = runs.sort_values("date", ascending=False).head(8)
@@ -1235,9 +1307,10 @@ def render_goals():
                         continue
                     recent = meals[meals["date"] > half][name].dropna()
                     prev = meals[meals["date"] <= half][name].dropna()
-                    if len(recent) < 3:
+                    if len(recent) == 0:
                         c.metric(f"{name} (g)", "—", f"目標 {goal:.0f}g",
                                  delta_color="off")
+                        c.caption("記録待ち")
                         continue
                     avg = recent.mean()
                     ok = (avg <= goal) if down else (avg >= goal)
@@ -1245,6 +1318,8 @@ def render_goals():
                              f"{avg - goal:+.1f} 目標比",
                              delta_color="inverse" if down else "normal")
                     line = f"目標 {goal:.0f}g"
+                    if len(recent) < 3:
+                        line += f" / 参考値 n={len(recent)}日"
                     if len(prev) >= 3:
                         line += f" / 前週比 {avg - prev.mean():+.1f}"
                     hit = m30[name].dropna()
@@ -1269,12 +1344,12 @@ def render_goals():
                         ("up", ["タンパク質", "繊維"],
                          "狙い: 目標線より上をキープ(筋量と腸内環境)")]:
                     use = [n for n in names if n in trend.columns
-                           and trend[n].notna().sum() >= 7]
+                           and trend[n].notna().sum() >= 3]
                     if not use:
                         continue
                     plot_cols = {}
                     for n in use:
-                        trend[f"{n}(7日平均)"] = trend[n].rolling(7, min_periods=3).mean()
+                        trend[f"{n}(7日平均)"] = trend[n].rolling(7, min_periods=2).mean()
                         plot_cols[f"{n}(7日平均)"] = NUTRI_COLOR[n]
                     fig = line_fig(trend.dropna(subset=use, how="all"),
                                    plot_cols, height=220)
