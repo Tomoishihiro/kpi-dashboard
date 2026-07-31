@@ -43,6 +43,31 @@ GOAL_START = dt.date(2026, 1, 1)   # 計画ライン・対計画計算の起点(
 GOAL_END = dt.date(2026, 12, 31)
 WAIST_GOAL = 76.0  # 腹囲目標 cm
 
+# ---- 筋トレ: 標準メニュー(1セットあたり)と段階のはしご ----
+# 体感負荷が軽い側に振れたら、リストの次の値へ1段だけ上げる。
+STRENGTH_LADDER = {
+    "ヒップリフト_秒": [20, 30, 40],
+    "プッシュアップ_回": [10, 12, 15],
+    "プランク_秒": [30, 40, 50, 60],
+    "スクワット_回": [15, 20, 25],
+    "ロウ_回": [10, 12, 15],
+}
+STRENGTH_NEXT_STAGE = {  # はしごを登り切った後の次の種目
+    "ヒップリフト_秒": "片脚ヒップリフト10秒",
+    "プッシュアップ_回": "足を台に乗せて10回",
+    "プランク_秒": "片手または片脚を浮かす",
+    "スクワット_回": "ブルガリアンスクワット10回",
+    "ロウ_回": "チューブの強度を1段上げる",
+}
+LOAD_SUFFIX = "_負荷"
+LOAD_UP = 2      # これ以下が続いたら上げる
+LOAD_DOWN = 5    # これ以上が続いたら下げる
+LOAD_STREAK = 2  # 何回連続で判定するか(週1なので2回=2週間)
+# 成長指数: 初回を100とし、種目ごとの (今回値/初回値) を平均する。
+# メニュー固定の間は値が動かないので、体感負荷が1段軽くなるごとに
+# LOAD_BONUS 分を上乗せして「同じ回数が楽になった」も成長として拾う。
+LOAD_BONUS = 0.10
+
 # ---- 故障予防(週間距離の増やしすぎ防止) ----
 RUN_CAP_RATIO = 1.10   # 増加の上限(前週比+10%)
 RUN_FLOOR_KM = 8.0     # 基準が小さい週でも、ここまでは許容(復帰・再開のための下駄)
@@ -335,6 +360,7 @@ drink_dates = set(meals[meals["飲酒"]]["date"]) if not meals.empty else set()
 # ---- 筋トレ: 末尾が _回 / _秒 / _kg の数値プロパティを種目として自動検出 ----
 STRENGTH_SUFFIX = ("_回", "_秒", "_kg")
 strength_cols: list[str] = []
+load_cols: list[str] = []
 _st_rows = []
 for p in data.get("strength", []):
     if not na.prop_date(p, "日付"):
@@ -343,21 +369,64 @@ for p in data.get("strength", []):
            "セット数": na.prop_number(p, "セット数"),
            "メモ": na.prop_rich_text(p, "メモ")}
     for pname, pval in (p.get("properties") or {}).items():
-        if pval.get("type") == "number" and pname.endswith(STRENGTH_SUFFIX):
+        if pval.get("type") != "number":
+            continue
+        if pname.endswith(LOAD_SUFFIX):
+            row[pname] = pval.get("number")
+            if pname not in load_cols:
+                load_cols.append(pname)
+        elif pname.endswith(STRENGTH_SUFFIX):
             row[pname] = pval.get("number")
             if pname not in strength_cols:
                 strength_cols.append(pname)
     _st_rows.append(row)
 strength_cols.sort()
+load_cols.sort()
 strength = pd.DataFrame(_st_rows)
 if not strength.empty:
     strength["date"] = to_jst_date(strength["date"])
     strength = strength.sort_values("date").reset_index(drop=True)
-    for c in strength_cols:
+    for c in strength_cols + load_cols:
         strength[c] = pd.to_numeric(strength.get(c), errors="coerce")
 strength_dates = set(strength["date"]) if not strength.empty else set()
 gym_weeks = weekly_streak(strength_dates, today)
 gym_this_week = week_start_of(today) in {week_start_of(d) for d in strength_dates}
+
+# 橙・赤の日は体感が重く出るので判定から除外する
+_sig_by_date = ({r["date"]: r["総合"] for _, r in cond.iterrows() if r["総合"]}
+                if not cond.empty else {})
+
+
+def load_verdict(load_col: str) -> tuple:
+    """体感負荷から次の一手を返す -> (判定, 直近の負荷リスト)。
+
+    判定: "up"(上げる) / "down"(下げる) / "keep"(維持) / "wait"(データ待ち)
+    """
+    if strength.empty or load_col not in strength.columns:
+        return ("wait", [])
+    ok = strength[strength[load_col].notna()]
+    ok = ok[~ok["date"].map(lambda d: _sig_by_date.get(d) in ("橙", "赤"))]
+    vals = [float(v) for v in ok[load_col].tail(LOAD_STREAK)]
+    if len(vals) < LOAD_STREAK:
+        return ("wait", vals)
+    if all(v <= LOAD_UP for v in vals):
+        return ("up", vals)
+    if all(v >= LOAD_DOWN for v in vals):
+        return ("down", vals)
+    return ("keep", vals)
+
+
+def next_rung(base_col: str, current) -> str:
+    """今の値から見て、はしごの次の段を文言で返す。"""
+    ladder = STRENGTH_LADDER.get(base_col, [])
+    unit = "秒" if base_col.endswith("_秒") else "回"
+    if current is None or not ladder:
+        return STRENGTH_NEXT_STAGE.get(base_col, "1段上げる")
+    for v in ladder:
+        if v > current:
+            return f"{v}{unit}"
+    return STRENGTH_NEXT_STAGE.get(base_col, "1段上げる")
+
 
 log_dates = set(logs["date"]) if not logs.empty else set()
 stretch_dates = set(logs[logs["stretch"]]["date"]) if not logs.empty else set()
@@ -1369,8 +1438,15 @@ def render_goals():
         st.markdown(linked_header("💪 筋トレ(週1回・全身)", URL_STRENGTH_DB),
                     unsafe_allow_html=True)
         if strength.empty or not strength_cols:
-            st.info("まだ記録がありません。最初の1回を入れると、ここに種目別の伸びが出ます。\n\n"
-                    "回数は3セットの合計を入力(例: 10+10+8 → 28)")
+            st.info(
+                "まだ記録がありません。最初の1回を入れると、ここに伸びが出ます。\n\n"
+                "**標準メニュー(各3セット)**\n"
+                "- ヒップリフト 20秒(休憩10秒)\n"
+                "- プッシュアップ 10回(休憩30秒)\n"
+                "- プランク 30秒(休憩10秒)\n"
+                "- スクワット 15回(休憩30秒)\n\n"
+                "数値は**1セットあたり**を入力。毎回同じなのでテンプレートから作れば"
+                "入力は体感負荷(1〜5)だけです。")
         else:
             m = st.columns(4)
             m[0].metric("今週", "実施済 ✓" if gym_this_week else "未実施",
@@ -1383,7 +1459,9 @@ def render_goals():
 
             rep_cols = [c for c in strength_cols if c.endswith("_回")]
             if rep_cols:
-                strength["総レップ"] = strength[rep_cols].sum(axis=1, min_count=1)
+                sets = strength["セット数"].fillna(3)
+                strength["総レップ"] = (strength[rep_cols].sum(axis=1, min_count=1)
+                                     * sets)
                 tot = strength.dropna(subset=["総レップ"])
                 if not tot.empty:
                     cur_v = float(tot["総レップ"].iloc[-1])
@@ -1393,8 +1471,156 @@ def render_goals():
                     if len(tot) >= 2:
                         st.plotly_chart(line_fig(tot, {"総レップ": "#22C55E"}, height=200),
                                         use_container_width=True)
-                        st.caption("セッションの総レップ数(全種目合計)。"
+                        st.caption("セッションの総レップ数(1セットあたり×セット数の合計)。"
                                    "これが右肩上がりなら順調")
+
+            # ---- 成長の推移(メモはホバーで表示) ----
+            def _wrap(s: str, w: int = 26) -> str:
+                return "<br>".join(s[i:i + w] for i in range(0, len(s), w))
+
+            def _stem(col: str) -> str:
+                return col.rsplit("_", 1)[0]
+
+            def _unit(col: str) -> str:
+                return ("秒" if col.endswith("_秒")
+                        else "kg" if col.endswith("_kg") else "回")
+
+            first = strength.iloc[0]
+            growth = []
+            for _, r in strength.iterrows():
+                ratios = []
+                for c in strength_cols:
+                    b_v, c_v = first.get(c), r.get(c)
+                    if pd.isna(b_v) or pd.isna(c_v) or not b_v:
+                        continue
+                    adj = 1.0
+                    lc = _stem(c) + LOAD_SUFFIX
+                    if lc in strength.columns:
+                        b_l, c_l = first.get(lc), r.get(lc)
+                        if not pd.isna(b_l) and not pd.isna(c_l):
+                            adj = 1 + (b_l - c_l) * LOAD_BONUS
+                    ratios.append(c_v / b_v * adj)
+                growth.append(sum(ratios) / len(ratios) * 100 if ratios else None)
+            strength["成長指数"] = growth
+
+            def _hover(r) -> str:
+                parts = [f"<b>{r['date'].strftime('%Y/%m/%d')}</b>"]
+                gi = r.get("成長指数")
+                if not pd.isna(gi):
+                    parts.append(f"成長指数 {gi:.0f}")
+                for c in strength_cols:
+                    v = r.get(c)
+                    if pd.isna(v):
+                        continue
+                    lc = _stem(c) + LOAD_SUFFIX
+                    lv = r.get(lc) if lc in strength.columns else None
+                    lt = "" if lv is None or pd.isna(lv) else f" / 負荷 {lv:.0f}"
+                    parts.append(f"{_stem(c)}: {v:.0f}{_unit(c)}{lt}")
+                memo = str(r.get("メモ") or "").strip()
+                if memo:
+                    parts.append("─────")
+                    parts.append("📝 " + _wrap(memo))
+                return "<br>".join(parts)
+
+            gvals = strength.dropna(subset=["成長指数"])
+            if not gvals.empty:
+                st.markdown("###### 📈 成長の推移")
+                cur_g = float(gvals["成長指数"].iloc[-1])
+                gm = st.columns(3)
+                gm[0].metric("成長指数", f"{cur_g:.0f}",
+                             f"{cur_g - 100:+.0f} 初回比" if len(gvals) >= 2 else None)
+                if len(gvals) >= 2:
+                    gm[1].metric("前回比",
+                                 f"{cur_g - float(gvals['成長指数'].iloc[-2]):+.0f}")
+                    gm[2].metric("最高値", f"{gvals['成長指数'].max():.0f}")
+
+                gfig = go.Figure(go.Scatter(
+                    x=list(gvals["date"]), y=list(gvals["成長指数"]),
+                    mode="lines+markers", line=dict(color="#22C55E", width=2),
+                    marker=dict(size=11, color="#22C55E",
+                                line=dict(color="#0D1117", width=1)),
+                    hovertext=[_hover(r) for _, r in gvals.iterrows()],
+                    hoverinfo="text"))
+                gfig.add_hline(y=100, line=dict(color="#6B7280", width=1, dash="dot"),
+                               annotation_text="初回=100",
+                               annotation_position="bottom left",
+                               annotation_font_size=10)
+                gfig.update_layout(
+                    height=260, margin=dict(l=10, r=10, t=10, b=10),
+                    hoverlabel=dict(align="left", bgcolor="#161B22",
+                                    bordercolor="#30363D",
+                                    font=dict(size=12, color="#E6EDF3")))
+                st.plotly_chart(gfig, use_container_width=True)
+                st.caption("点をタップすると、その日の内容とメモが出ます。"
+                           "回数が同じでも体感負荷が1段軽くなれば約10ポイント上がります")
+
+                memos = [(r["date"], str(r.get("メモ") or "").strip())
+                         for _, r in strength.iterrows()
+                         if str(r.get("メモ") or "").strip()]
+                if memos:
+                    with st.expander(f"📝 メモ一覧 ({len(memos)}件)"):
+                        for d, mtxt in reversed(memos):
+                            st.markdown(f"**{d.strftime('%m/%d')}** — {mtxt}")
+
+            # ---- 体感負荷と次の一手 ----
+            if load_cols:
+                st.markdown("###### 📶 体感負荷と次の一手")
+                st.caption(f"1〜{LOAD_DOWN}で評価。{LOAD_UP}以下が{LOAD_STREAK}回続いたら"
+                           f"1段上げ、{LOAD_DOWN}が{LOAD_STREAK}回続いたら休憩を延ばす。"
+                           "🟠🔴の日のセッションは判定から除外")
+                VERDICT = {
+                    "up": ("⬆️", "#22C55E", "上げどき"),
+                    "keep": ("➡️", "#6B7280", "維持"),
+                    "down": ("⬇️", "#EF4444", "休憩を30秒に延ばす"),
+                    "wait": ("⏳", "#6B7280", "判定にはあと1回"),
+                }
+                up_list = []
+                for lc in load_cols:
+                    stem = lc[:-len(LOAD_SUFFIX)]
+                    base = next((c for c in strength_cols
+                                 if c.startswith(stem + "_")), None)
+                    v, vals = load_verdict(lc)
+                    cur = None
+                    if base and strength[base].notna().any():
+                        cur = float(strength[base].dropna().iloc[-1])
+                    icon, color, word = VERDICT[v]
+                    unit = "秒" if base and base.endswith("_秒") else "回"
+                    now_txt = f"{cur:.0f}{unit}" if cur is not None else "—"
+                    hist = "→".join(f"{x:.0f}" for x in vals) if vals else "記録なし"
+                    action = word
+                    if v == "up" and base:
+                        action = f"{word}: {next_rung(base, cur)} へ"
+                        up_list.append(stem)
+                    st.markdown(
+                        f"<div style='display:flex;justify-content:space-between;"
+                        f"padding:0.3rem 0.5rem;border-left:3px solid {color};"
+                        f"background:#161B2288;margin-bottom:3px;border-radius:4px'>"
+                        f"<span>{icon} <b>{stem}</b> "
+                        f"<span style='color:#6B7280'>今 {now_txt} / 負荷 {hist}"
+                        f"</span></span>"
+                        f"<span style='color:{color}'>{action}</span></div>",
+                        unsafe_allow_html=True)
+                if len(up_list) >= 2:
+                    st.warning("⚠️ 上げどきが複数あります。"
+                               f"一度に変えるのは1種目だけ。まずは「{up_list[0]}」から")
+
+                # 負荷の推移
+                use_l = [c for c in load_cols if strength[c].notna().sum() >= 2]
+                if use_l:
+                    palette = ["#3B82F6", "#F97316", "#A78BFA", "#14B8A6", "#EAB308"]
+                    lfig = line_fig(
+                        strength,
+                        {c: palette[i % len(palette)] for i, c in enumerate(use_l)},
+                        height=220)
+                    lfig.add_hline(y=LOAD_UP, line=dict(color="#22C55E", width=1,
+                                                        dash="dot"),
+                                   annotation_text="これ以下が続いたら上げる",
+                                   annotation_position="bottom left",
+                                   annotation_font_size=10)
+                    lfig.update_yaxes(range=[0.5, 5.5], dtick=1)
+                    st.plotly_chart(lfig, use_container_width=True)
+                    st.caption("負荷が下がってきたら伸びている証拠。"
+                               "段階を上げた直後に上振れるのは正常")
 
             palette = ["#3B82F6", "#F97316", "#A78BFA", "#14B8A6",
                        "#EAB308", "#EF4444", "#22C55E"]
@@ -1416,9 +1642,8 @@ def render_goals():
             if best:
                 st.caption("🏅 自己ベスト: " +
                            " / ".join(f"{c} {v:.0f}" for c, v in best))
-            st.caption("伸ばし方: 全セットで上限回数に届いたら次の段階へ"
-                       "(膝つき→つま先プッシュアップ、スクワット→片脚寄り、"
-                       "プランク→+10秒)。回数が頭打ちでも段階が上がっていれば成長")
+            st.caption("調整は休憩→回数の順。負荷5が続くときは、まず休憩を"
+                       "10秒→30秒に延ばす。それでも重いなら回数を1段戻す")
 
     with tab_en:
         st.markdown(linked_header("🇬🇧 英語学習(週目標 7時間)", URL_LEARNING_DB),
