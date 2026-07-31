@@ -387,7 +387,10 @@ if not strength.empty:
     strength["date"] = to_jst_date(strength["date"])
     strength = strength.sort_values("date").reset_index(drop=True)
     for c in strength_cols + load_cols:
-        strength[c] = pd.to_numeric(strength.get(c), errors="coerce")
+        if c in strength.columns:
+            strength[c] = pd.to_numeric(strength[c], errors="coerce")
+        else:
+            strength[c] = pd.NA
 strength_dates = set(strength["date"]) if not strength.empty else set()
 gym_weeks = weekly_streak(strength_dates, today)
 gym_this_week = week_start_of(today) in {week_start_of(d) for d in strength_dates}
@@ -405,7 +408,13 @@ def load_verdict(load_col: str) -> tuple:
     if strength.empty or load_col not in strength.columns:
         return ("wait", [])
     ok = strength[strength[load_col].notna()]
-    ok = ok[~ok["date"].map(lambda d: _sig_by_date.get(d) in ("橙", "赤"))]
+    if ok.empty:
+        return ("wait", [])
+    # マスクは必ずbool型のlistで作る(空Seriesだとラベル指定と誤解される)
+    keep = [_sig_by_date.get(d) not in ("橙", "赤") for d in ok["date"]]
+    ok = ok[keep]
+    if ok.empty:
+        return ("wait", [])
     vals = [float(v) for v in ok[load_col].tail(LOAD_STREAK)]
     if len(vals) < LOAD_STREAK:
         return ("wait", vals)
@@ -1575,7 +1584,11 @@ def render_goals():
                     "wait": ("⏳", "#6B7280", "判定にはあと1回"),
                 }
                 up_list = []
+                shown = 0
                 for lc in load_cols:
+                    if strength[lc].notna().sum() == 0:
+                        continue  # 未着手の種目は表示しない
+                    shown += 1
                     stem = lc[:-len(LOAD_SUFFIX)]
                     base = next((c for c in strength_cols
                                  if c.startswith(stem + "_")), None)
