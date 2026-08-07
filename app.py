@@ -34,9 +34,13 @@ JST = dt.timezone(dt.timedelta(hours=9))
 SIGNAL_COLOR = {"青": "#3B82F6", "緑": "#22C55E", "黄": "#EAB308",
                 "橙": "#F97316", "赤": "#EF4444", None: "#6B7280"}
 
-GOAL_KM = 100.0
-STRETCH_KM = 150.0  # 年間ストレッチ目標
-WEEKLY_EN_MIN = 420.0  # 英語 週目標(7時間)
+GOAL_KM = 150.0            # 年間目標(2026/8に100km達成 → 150kmへ再設定)
+MILESTONE_KM = 100.0       # 達成済みマイルストーン(グラフに残す)
+STRETCH_KM = 200.0         # 年間ストレッチ目標
+# 英語は「時間」ではなく「スピーキング回数」を主指標にする。
+# 時間の合計はごまかせるが、レッスンを何回やったかは動かせない事実。
+WEEKLY_SPEAK_CNT = 3       # 英語 週目標: スピーキング実施回数(主指標)
+WEEKLY_EN_MIN = 210.0      # 英語 週目標: 学習時間(1日30分×7=補助指標)
 URL_LEARNING_DB = "https://app.notion.com/p/0f1cb96b58694555b6315adf5b711ea4"  # 学習記録DB
 URL_TADOKU_DB = "https://app.notion.com/p/26f6e5b9ef1080e79a20d92691202f71"    # 多読記録
 GOAL_START = dt.date(2026, 1, 1)   # 計画ライン・対計画計算の起点(年初から)
@@ -733,8 +737,8 @@ def render_today():
     mid_l, mid_r = st.columns([2, 1])
 
     with mid_l:
-        st.markdown(linked_header("🏃 100kmチャレンジ (2026年累計)", URL_RUN_DB),
-                    unsafe_allow_html=True)
+        st.markdown(linked_header(f"🏃 {GOAL_KM:.0f}kmチャレンジ (2026年累計)",
+                                  URL_RUN_DB), unsafe_allow_html=True)
         total_km = float(runs["km"].sum()) if not runs.empty else 0.0
         elapsed = (today - GOAL_START).days + 1
         period = (GOAL_END - GOAL_START).days + 1
@@ -745,6 +749,8 @@ def render_today():
         m2.metric("達成率", f"{total_km / GOAL_KM * 100:.0f}%")
         m3.metric("必要ペース", f"{max(need_per_week, 0):.1f} km/週")
         st.progress(min(total_km / GOAL_KM, 1.0))
+        if total_km >= MILESTONE_KM:
+            st.caption(f"🎉 {MILESTONE_KM:.0f}km 達成済み → {GOAL_KM:.0f}km に再設定")
 
     with mid_r:
         st.markdown("#### ⚖️ 体重トレンド")
@@ -1218,7 +1224,7 @@ def render_condition():
 # ================= 目標 =================
 def render_goals():
     tab_run, tab_weight, tab_gym, tab_en, tab_bucket = st.tabs(
-        ["🏃 ランニング 100km", "⚖️ 体重・脂質改善", "💪 筋トレ", "🇬🇧 英語",
+        ["🏃 ランニング 150km", "⚖️ 体重・脂質改善", "💪 筋トレ", "🇬🇧 英語",
          "🪣 タイムバケット"])
 
     with tab_run:
@@ -1227,6 +1233,10 @@ def render_goals():
         elapsed = (today - GOAL_START).days + 1
         period = (GOAL_END - GOAL_START).days + 1
         on_pace_km = GOAL_KM * max(elapsed, 0) / period
+        if total_km >= MILESTONE_KM:
+            st.success(f"🎉 **{MILESTONE_KM:.0f}km 達成** "
+                       f"— 育休ブランクからの再開で達成。"
+                       f"目標を {GOAL_KM:.0f}km に再設定")
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("累計", f"{total_km:.1f} km", f"{total_km - on_pace_km:+.1f} 対計画")
         m2.metric("達成率", f"{total_km / GOAL_KM * 100:.0f}%")
@@ -1239,10 +1249,15 @@ def render_goals():
             fig.add_trace(go.Scatter(x=cum["date"], y=cum["km"], mode="lines+markers",
                                      name="実績", line=dict(color="#22C55E", width=3)))
             fig.add_trace(go.Scatter(x=[GOAL_START, GOAL_END], y=[0, GOAL_KM], mode="lines",
-                                     name="目標 100km", line=dict(color="#6B7280", dash="dash")))
+                                     name=f"目標 {GOAL_KM:.0f}km",
+                                     line=dict(color="#6B7280", dash="dash")))
             fig.add_trace(go.Scatter(x=[GOAL_START, GOAL_END], y=[0, STRETCH_KM], mode="lines",
                                      name=f"ストレッチ {STRETCH_KM:.0f}km",
                                      line=dict(color="#EAB308", dash="dot")))
+            # 達成済みマイルストーン(100km)を水平線で残す
+            fig.add_hline(y=MILESTONE_KM, line_dash="dot", line_color="#22C55E",
+                          annotation_text=f"✅ {MILESTONE_KM:.0f}km 達成",
+                          annotation_position="right")
             fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10),
                               legend=dict(orientation="h", y=1.1))
             st.plotly_chart(fig, use_container_width=True)
@@ -1714,8 +1729,11 @@ def render_goals():
                        "10秒→30秒に延ばす。それでも重いなら回数を1段戻す")
 
     with tab_en:
-        st.markdown(linked_header("🇬🇧 英語学習(週目標 7時間)", URL_LEARNING_DB),
-                    unsafe_allow_html=True)
+        st.markdown(linked_header("🇬🇧 英語学習(週目標 スピーキング3回)",
+                                  URL_LEARNING_DB), unsafe_allow_html=True)
+        st.caption("ゴールは「外国人と不自由なく話せるようになる」。"
+                   "話せるようになる律速はアウトプット量なので、"
+                   "**スピーキング回数**を主指標、学習時間は補助指標として見る")
         TYPE_COLOR = {"リスニング": "#3B82F6", "スピーキング": "#22C55E",
                       "ライティング": "#F97316", "リーディング": "#14B8A6",
                       "Anki": "#A78BFA", "その他": "#6B7280"}
@@ -1741,13 +1759,26 @@ def render_goals():
             this_week = learn[learn["date"] >= week_start]
             wk_min = float(this_week["分"].sum())
             days_left = 7 - today.weekday()
-            m1, m2, m3 = st.columns(3)
-            m1.metric("今週の合計", f"{wk_min / 60:.1f} h",
-                      f"{(wk_min - WEEKLY_EN_MIN) / 60:+.1f} h 対目標")
-            m2.metric("達成率", f"{wk_min / WEEKLY_EN_MIN * 100:.0f}%")
-            m3.metric("残り", f"{max(WEEKLY_EN_MIN - wk_min, 0) / 60:.1f} h"
+
+            # ---- 主指標: スピーキング実施回数 ----
+            sp_week = this_week[this_week["種別"] == "スピーキング"]
+            sp_cnt = int(len(sp_week))
+            s1, s2, s3 = st.columns(3)
+            s1.metric("🗣️ 今週のスピーキング", f"{sp_cnt} / {WEEKLY_SPEAK_CNT} 回",
+                      f"{sp_cnt - WEEKLY_SPEAK_CNT:+d} 回 対目標")
+            s2.metric("達成率", f"{sp_cnt / WEEKLY_SPEAK_CNT * 100:.0f}%")
+            s3.metric("残り", f"{max(WEEKLY_SPEAK_CNT - sp_cnt, 0)} 回"
                              f"(あと{days_left}日)")
-            st.progress(min(wk_min / WEEKLY_EN_MIN, 1.0))
+            st.progress(min(sp_cnt / WEEKLY_SPEAK_CNT, 1.0))
+            if sp_cnt == 0:
+                st.caption("⚠️ 今週まだ口を開いていない。教材は何でもいい、"
+                           "25分の枠を1つ取るところから")
+
+            # ---- 補助指標: 学習時間 ----
+            st.caption(
+                f"補助指標 — 今週の学習時間 **{wk_min / 60:.1f} h** / "
+                f"目標 {WEEKLY_EN_MIN / 60:.1f} h "
+                f"({(wk_min - WEEKLY_EN_MIN) / 60:+.1f} h)")
 
             # 今週の種別内訳
             if not this_week.empty:
@@ -1755,7 +1786,35 @@ def render_goals():
                 st.caption("今週の内訳: " + " / ".join(
                     f"{t} {int(v)}分" for t, v in parts.items() if v > 0))
 
+            # ---- 主指標の推移: 週別スピーキング回数(12週) ----
+            st.markdown("##### 🗣️ 週別スピーキング回数 — 主指標")
+            sp_all = learn[learn["種別"] == "スピーキング"].copy()
+            if sp_all.empty:
+                st.info("学習記録DBで 種別=スピーキング を記録すると、"
+                        "ここに週別の実施回数が表示されます")
+            else:
+                sp_all["week"] = sp_all["date"].map(
+                    lambda d: d - dt.timedelta(days=d.weekday()))
+                sp_wk = sp_all.groupby("week").size().reset_index(name="回数")
+                sp_wk = sp_wk.sort_values("week").tail(12)
+                figs = go.Figure(go.Bar(
+                    x=sp_wk["week"], y=sp_wk["回数"], marker_color="#22C55E",
+                    hovertext=[f"{w}<br>{c} 回" for w, c
+                               in zip(sp_wk["week"], sp_wk["回数"])],
+                    hoverinfo="text"))
+                figs.add_hline(y=WEEKLY_SPEAK_CNT, line_dash="dash",
+                               line_color="#EAB308",
+                               annotation_text=f"週目標 {WEEKLY_SPEAK_CNT}回")
+                figs.update_layout(height=240,
+                                   margin=dict(l=10, r=10, t=10, b=10),
+                                   yaxis_title="回/週")
+                st.plotly_chart(figs, use_container_width=True)
+                hit = int((sp_wk["回数"] >= WEEKLY_SPEAK_CNT).sum())
+                st.caption(f"直近{len(sp_wk)}週のうち **{hit}週** で目標達成。"
+                           "ゼロの週を作らないことが最優先(完璧な週より継続)")
+
             # 週別積み上げバー(12週)
+            st.markdown("##### ⏱️ 週別 学習時間の内訳 — 補助指標")
             wk = learn.copy()
             wk["week"] = wk["date"].map(lambda d: d - dt.timedelta(days=d.weekday()))
             pivot = wk.pivot_table(index="week", columns="種別", values="分",
@@ -1767,7 +1826,7 @@ def render_goals():
                     fig.add_trace(go.Bar(x=pivot.index, y=pivot[t], name=t,
                                          marker_color=TYPE_COLOR[t]))
             fig.add_hline(y=WEEKLY_EN_MIN, line_dash="dash", line_color="#EAB308",
-                          annotation_text="週目標 420分")
+                          annotation_text=f"週目標 {WEEKLY_EN_MIN:.0f}分")
             fig.update_layout(barmode="stack", height=280,
                               margin=dict(l=10, r=10, t=10, b=10),
                               legend=dict(orientation="h", y=1.12))
