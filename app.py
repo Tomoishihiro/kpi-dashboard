@@ -1308,22 +1308,77 @@ def render_goals():
                 elif acwr < 0.8 and cur_km > 0:
                     st.caption(f"📉 直近4週平均比 {acwr:.2f}倍 — 余裕あり")
 
+            seq = [this_wk - dt.timedelta(days=7 * i) for i in range(11, -1, -1)]
+            wvals = [km_by_week.get(w, 0.0) for w in seq]
+            wcaps = [run_cap(w)[0] for w in seq]
+            wfig = go.Figure()
+            wfig.add_trace(go.Bar(
+                x=seq, y=wvals, name="実績",
+                marker_color=["#EF4444" if v > c else "#22C55E"
+                              for v, c in zip(wvals, wcaps)]))
+            wfig.add_trace(go.Scatter(x=seq, y=wcaps, mode="lines", name="上限",
+                                      line=dict(color="#EAB308", width=1,
+                                                dash="dot")))
+            wfig.update_layout(height=200, margin=dict(l=10, r=10, t=10, b=10),
+                               showlegend=False)
+            st.plotly_chart(wfig, use_container_width=True)
+            st.caption("週別距離 (km) — 点線が各週の上限。超過した週は赤")
+
+            st.divider()
+            # ---- 月別距離(目標ペースとの比較) ----
+            mk = runs.copy()
+            mk["month"] = pd.to_datetime(mk["date"]).dt.strftime("%Y-%m")
+            km_by_month = mk.groupby("month")["km"].sum().to_dict()
+
+            months = []  # 目標期間の全月(走っていない月も棒0で並べる)
+            cur_m = GOAL_START.replace(day=1)
+            last_m = GOAL_END.replace(day=1)
+            while cur_m <= last_m:
+                months.append(cur_m)
+                cur_m = (cur_m.replace(day=28) + dt.timedelta(days=4)).replace(day=1)
+            n_months = len(months)
+            pace_km = GOAL_KM / n_months          # 目標達成に必要な月あたり距離
+            stretch_pace = STRETCH_KM / n_months
+
+            labels = [f"{m.month}月" for m in months]
+            mvals = [km_by_month.get(m.strftime("%Y-%m"), 0.0) for m in months]
+            this_m = today.replace(day=1)
+            mcolors = []
+            for m, v in zip(months, mvals):
+                if m > this_m:
+                    mcolors.append("#21262D")          # 未来の月
+                elif v >= stretch_pace:
+                    mcolors.append("#EAB308")          # ストレッチ達成
+                elif v >= pace_km:
+                    mcolors.append("#22C55E")          # 目標ペース達成
+                else:
+                    mcolors.append("#3B82F6")          # ペース未達
+
             g1, g2 = st.columns([1, 1.2])
             with g1:
-                st.caption("週別距離 (km) — 点線が各週の上限")
-                seq = [this_wk - dt.timedelta(days=7 * i) for i in range(11, -1, -1)]
-                vals = [km_by_week.get(w, 0.0) for w in seq]
-                caps = [run_cap(w)[0] for w in seq]
-                colors = ["#EF4444" if v > c else "#22C55E"
-                          for v, c in zip(vals, caps)]
-                wfig = go.Figure()
-                wfig.add_trace(go.Bar(x=seq, y=vals, marker_color=colors, name="実績"))
-                wfig.add_trace(go.Scatter(x=seq, y=caps, mode="lines", name="上限",
-                                          line=dict(color="#EAB308", width=1,
-                                                    dash="dot")))
-                wfig.update_layout(height=240, margin=dict(l=10, r=10, t=10, b=10),
+                st.caption(f"月別距離 (km) — 破線が目標ペース {pace_km:.1f}km/月")
+                mfig = go.Figure()
+                mfig.add_trace(go.Bar(
+                    x=labels, y=mvals, marker_color=mcolors,
+                    text=[f"{v:.0f}" if v else "" for v in mvals],
+                    textposition="outside", textfont=dict(size=10),
+                    hovertemplate="%{x} %{y:.1f} km<extra></extra>"))
+                mfig.add_hline(y=pace_km, line=dict(color="#6B7280", width=1,
+                                                    dash="dash"))
+                mfig.add_hline(y=stretch_pace, line=dict(color="#EAB308", width=1,
+                                                         dash="dot"))
+                mfig.update_layout(height=240, margin=dict(l=10, r=10, t=20, b=10),
                                    showlegend=False)
-                st.plotly_chart(wfig, use_container_width=True)
+                mfig.update_xaxes(type="category")
+                st.plotly_chart(mfig, use_container_width=True)
+
+                done_m = [v for m, v in zip(months, mvals) if m <= this_m]
+                if done_m:
+                    hit = sum(1 for v in done_m if v >= pace_km)
+                    cur_month_km = km_by_month.get(today.strftime("%Y-%m"), 0.0)
+                    st.caption(f"🟢目標ペース達成 {hit}/{len(done_m)}ヶ月 ・ "
+                               f"今月 {cur_month_km:.1f}km ・ "
+                               f"月平均 {sum(done_m) / len(done_m):.1f}km")
             with g2:
                 st.caption("直近のラン")
                 show = runs.sort_values("date", ascending=False).head(8)
