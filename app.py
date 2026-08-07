@@ -16,6 +16,7 @@ import datetime as dt
 
 import pandas as pd
 import plotly.graph_objects as go
+import requests
 import streamlit as st
 
 import notion_api as na
@@ -100,6 +101,8 @@ URL_DAILY_DB = "https://app.notion.com/p/44f2b9e428fe48749d4b4bb5ce66e51f"    # 
 URL_MED_DB = "https://app.notion.com/p/1f06e5b9ef1080868d9be79a2fe00ab6"      # 瞑想記録DB
 URL_COND_DB = "https://app.notion.com/p/0c718e4a65d64b95bcc192ecb9106b70"     # コンディション記録DB
 URL_STRENGTH_DB = "https://app.notion.com/p/5b8903881e814c7e8f7ea1c1d4067976"  # 💪 筋トレ記録DB
+URL_WANT_DB = "https://app.notion.com/p/5d1103fafd8a4f479898cf5e96ce69b4"     # ✨ やりたいこと記録
+WANT_DS_ID = "dde4c1e3-d1e3-46a4-9cd7-c3da6cf70b9a"  # やりたいこと記録 data source
 
 
 def linked_header(title: str, url: str) -> str:
@@ -151,6 +154,35 @@ def load_alltime() -> dict:
     d = na.fetch_alltime(TOKEN)
     d["_synced_at"] = dt.datetime.now(JST)
     return d
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_wantlist() -> list:
+    """✨ やりたいこと記録DB を全件取得(5分キャッシュ)。
+
+    notion_api.fetch_all を変更せずに済むよう、この画面専用に直接叩く。
+    """
+    url = f"https://api.notion.com/v1/data_sources/{WANT_DS_ID}/query"
+    headers = {"Authorization": f"Bearer {TOKEN}",
+               "Notion-Version": "2025-09-03",
+               "Content-Type": "application/json"}
+    out, cursor = [], None
+    try:
+        while True:
+            body = {"page_size": 100}
+            if cursor:
+                body["start_cursor"] = cursor
+            r = requests.post(url, headers=headers, json=body, timeout=30)
+            r.raise_for_status()
+            j = r.json()
+            out.extend(j.get("results", []))
+            if not j.get("has_more"):
+                break
+            cursor = j.get("next_cursor")
+    except Exception as e:  # DB未共有・権限なしでも画面を壊さない
+        st.session_state["_want_err"] = str(e)
+        return []
+    return out
 
 
 def longest_streak(dates: set) -> int:
@@ -1223,9 +1255,9 @@ def render_condition():
 
 # ================= 目標 =================
 def render_goals():
-    tab_run, tab_weight, tab_gym, tab_en, tab_bucket = st.tabs(
+    tab_run, tab_weight, tab_gym, tab_en, tab_want, tab_bucket = st.tabs(
         ["🏃 ランニング 150km", "⚖️ 体重・脂質改善", "💪 筋トレ", "🇬🇧 英語",
-         "🪣 タイムバケット"])
+         "✨ やりたいこと", "🪣 タイムバケット"])
 
     with tab_run:
         st.markdown(linked_header("🏃 ランニング記録", URL_RUN_DB), unsafe_allow_html=True)
@@ -1941,6 +1973,179 @@ def render_goals():
             q2.metric("レッスン(28日)", f"{lessons['量'].sum():.0f} 回")
         st.caption("※ リーディングの時間は学習記録(開始/終了ボタン計測)で週7時間に含まれます。"
                    "語数は多読記録DBで管理(読了時に入力)")
+
+    with tab_want:
+        st.markdown(linked_header("✨ やりたいこと記録", URL_WANT_DB),
+                    unsafe_allow_html=True)
+        st.caption("KPIは **記録数** と **実施数**。実施率は追わない — "
+                   "やりたいことを実施率で測ると義務に変わり、"
+                   "書く時点で「できそうなこと」しか書かなくなるため。"
+                   "**書けば必ず1件**なので、失敗が構造的に発生しない")
+
+        SCORE = {"5": 5, "4": 4, "3": 3, "2": 2, "1": 1}
+
+        def _score(v):
+            """'4 楽しみ' -> 4。未入力は None。"""
+            if not v:
+                return None
+            return SCORE.get(str(v).strip()[:1])
+
+        want_raw = load_wantlist()
+        if st.session_state.get("_want_err"):
+            st.warning("やりたいこと記録DBを取得できませんでした。"
+                       "Notionインテグレーションにこのデータベースを"
+                       "共有しているか確認してください")
+
+        want = pd.DataFrame([
+            {
+                "name": na.prop_title(p, "やりたいこと"),
+                "状態": na.prop_select(p, "状態"),
+                "記録日": na.prop_date(p, "記録日"),
+                "実施日": na.prop_date(p, "実施日"),
+                "なぜ": na.prop_rich_text(p, "なぜやりたいか"),
+                "期待値": _score(na.prop_select(p, "期待値")),
+                "満足度": _score(na.prop_select(p, "満足度")),
+                "感じたこと": na.prop_rich_text(p, "感じたこと"),
+                "カテゴリ": na.prop_select(p, "カテゴリ") or "その他",
+            }
+            for p in want_raw
+        ])
+
+        if want.empty:
+            st.info("やりたいことを記録すると、ここに集計が表示されます。\n\n"
+                    "**思いついた時に書く**: やりたいこと / なぜ(空欄可) / 期待値\n\n"
+                    "**やった後に書く**: 実施日 / 満足度 / 感じたこと")
+        else:
+            want["記録日"] = to_jst_date(want["記録日"])
+            want["実施日"] = to_jst_date(want["実施日"])
+            month_start = today.replace(day=1)
+
+            def _on_or_after(col, ref):
+                """全件Noneだと datetime64 になり date と比較できないため、
+                要素ごとに安全に判定する。"""
+                return col.map(
+                    lambda d: bool(pd.notna(d) and not isinstance(d, pd.Timestamp)
+                                   and d >= ref))
+
+            n_rec_all = len(want)
+            n_done_all = int((want["状態"] == "実施済み").sum())
+            n_rec_m = int(_on_or_after(want["記録日"], month_start).sum())
+            n_done_m = int(((want["状態"] == "実施済み")
+                            & _on_or_after(want["実施日"], month_start)).sum())
+            n_open = int((want["状態"] == "やりたい").sum())
+
+            w1, w2, w3 = st.columns(3)
+            w1.metric("📝 記録数", f"{n_rec_all} 件", f"今月 +{n_rec_m}")
+            w2.metric("✅ 実施数", f"{n_done_all} 件", f"今月 +{n_done_m}")
+            w3.metric("🌱 温めている", f"{n_open} 件", delta_color="off")
+
+            # ---- 月別の記録数・実施数(12ヶ月) ----
+            st.markdown("##### 📈 月別 記録数 / 実施数")
+            def _valid_dates(df, col):
+                """dt.date のみを残す(NaT/Timestamp を除外)。"""
+                mask = df[col].map(
+                    lambda d: pd.notna(d) and not isinstance(d, pd.Timestamp))
+                return df[mask]
+
+            rec_src = _valid_dates(want, "記録日")
+            rec_m = (rec_src.assign(
+                m=lambda d: d["記録日"].map(lambda x: x.replace(day=1)))
+                .groupby("m").size()) if not rec_src.empty else pd.Series(dtype=int)
+            done_src = _valid_dates(want[want["状態"] == "実施済み"], "実施日")
+            done_m = (done_src.assign(
+                m=lambda d: d["実施日"].map(lambda x: x.replace(day=1)))
+                .groupby("m").size()) if not done_src.empty else pd.Series(dtype=int)
+            months = sorted(set(rec_m.index) | set(done_m.index))[-12:]
+            if months:
+                figw = go.Figure()
+                figw.add_trace(go.Bar(x=months, y=[rec_m.get(m, 0) for m in months],
+                                      name="記録", marker_color="#6B7280"))
+                figw.add_trace(go.Bar(x=months, y=[done_m.get(m, 0) for m in months],
+                                      name="実施", marker_color="#22C55E"))
+                figw.update_layout(barmode="group", height=240,
+                                   margin=dict(l=10, r=10, t=10, b=10),
+                                   legend=dict(orientation="h", y=1.15))
+                st.plotly_chart(figw, use_container_width=True)
+
+            # ---- 期待値 ↔ 満足度 の差分(学びの本体) ----
+            st.markdown("##### 🎯 期待値 ↔ 満足度 — 自分の予測のクセ")
+            ev = want.dropna(subset=["期待値", "満足度"]).copy()
+            if ev.empty:
+                st.info("期待値と満足度が両方入った記録が貯まると、"
+                        "「思ったより良かった / 期待ほどでもなかった」の"
+                        "傾向がここに出ます")
+            else:
+                ev["差分"] = ev["満足度"] - ev["期待値"]
+                up = int((ev["差分"] > 0).sum())
+                same = int((ev["差分"] == 0).sum())
+                down = int((ev["差分"] < 0).sum())
+                d1, d2, d3, d4 = st.columns(4)
+                d1.metric("😀 期待以上", f"{up} 件")
+                d2.metric("😐 期待どおり", f"{same} 件")
+                d3.metric("😕 期待以下", f"{down} 件")
+                d4.metric("平均差分", f"{ev['差分'].mean():+.2f}",
+                          delta_color="off")
+
+                figd = go.Figure(go.Scatter(
+                    x=ev["期待値"], y=ev["満足度"], mode="markers",
+                    marker=dict(size=13, color=ev["差分"], colorscale="RdYlGn",
+                                cmin=-4, cmax=4,
+                                line=dict(color="#fff", width=1)),
+                    hovertext=[f"<b>{r['name']}</b><br>期待 {r['期待値']} → "
+                               f"満足 {r['満足度']} ({r['差分']:+d})<br>"
+                               + (r["感じたこと"][:80] if r["感じたこと"] else "")
+                               for _, r in ev.iterrows()],
+                    hoverinfo="text"))
+                figd.add_trace(go.Scatter(x=[1, 5], y=[1, 5], mode="lines",
+                                          line=dict(color="#6B7280", dash="dash"),
+                                          name="期待=満足", showlegend=False))
+                figd.update_layout(height=300,
+                                   margin=dict(l=10, r=10, t=10, b=10),
+                                   xaxis=dict(title="期待値", range=[0.5, 5.5],
+                                              dtick=1),
+                                   yaxis=dict(title="満足度", range=[0.5, 5.5],
+                                              dtick=1))
+                st.plotly_chart(figd, use_container_width=True)
+
+                avg = ev["差分"].mean()
+                if avg > 0.4:
+                    st.success("💡 やってみると **期待を超える** ことが多い。"
+                               "迷ったらやる方に倒していい、というデータ")
+                elif avg < -0.4:
+                    st.info("💡 **期待が高すぎる** 傾向。"
+                            "何に期待を盛りがちか、感じたことを読み返すと見える")
+                else:
+                    st.caption("期待と結果がおおむね一致。予測の精度は高い")
+
+                # カテゴリ別の差分
+                cat = (ev.groupby("カテゴリ")["差分"]
+                       .agg(["mean", "count"]).reset_index()
+                       .sort_values("mean", ascending=False))
+                if len(cat) > 1:
+                    st.caption("カテゴリ別の平均差分: " + " / ".join(
+                        f"{r['カテゴリ']} {r['mean']:+.1f}({int(r['count'])}件)"
+                        for _, r in cat.iterrows()))
+
+            # ---- 温めているもの(未実施) ----
+            st.markdown("##### 🌱 温めているやりたいこと")
+            open_df = want[want["状態"] == "やりたい"].copy()
+            if open_df.empty:
+                st.caption("未実施のやりたいことはありません")
+            else:
+                open_df = open_df.sort_values("記録日", ascending=False)
+                open_df["経過日"] = open_df["記録日"].map(
+                    lambda d: (today - d).days
+                    if (pd.notna(d) and not isinstance(d, pd.Timestamp))
+                    else None)
+                show = open_df[["name", "カテゴリ", "期待値", "経過日", "なぜ"]]
+                show.columns = ["やりたいこと", "カテゴリ", "期待値", "経過日", "なぜ"]
+                st.dataframe(show, use_container_width=True, hide_index=True)
+                old = open_df[open_df["経過日"].fillna(0) >= 60]
+                if not old.empty:
+                    st.caption(f"⏳ 60日以上温めているものが {len(old)} 件。"
+                               "何度も浮かぶのにやっていないものは、"
+                               "本当にやりたいことか、"
+                               "やらないと決めていいものかのどちらか")
 
     with tab_bucket:
         URL_BUCKET_DB = "https://app.notion.com/p/1ca6e5b9ef1080489650cdbdb9e9cb99"
