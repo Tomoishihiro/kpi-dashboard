@@ -103,6 +103,16 @@ URL_COND_DB = "https://app.notion.com/p/0c718e4a65d64b95bcc192ecb9106b70"     # 
 URL_STRENGTH_DB = "https://app.notion.com/p/5b8903881e814c7e8f7ea1c1d4067976"  # 💪 筋トレ記録DB
 URL_WANT_DB = "https://app.notion.com/p/5d1103fafd8a4f479898cf5e96ce69b4"     # ✨ やりたいこと記録
 WANT_DS_ID = "dde4c1e3-d1e3-46a4-9cd7-c3da6cf70b9a"  # やりたいこと記録 data source
+URL_PEOPLE_DB = "https://app.notion.com/p/81e447fb1efb4226be7265cbb62767e2"   # 🤝 人物
+PEOPLE_DS_ID = "81c2ff03-e967-46e2-a6b5-3f174d34ec8a"  # 人物 data source
+
+# ---- 人間関係: 中年期の孤立を防ぐための指標 ----
+# 主指標はストック(今いくつ生きているか)。フロー(今週やった量)は補助。
+# 途切れは失点ではなく復帰の機会として扱う(悪い日にシステムが免責する側に回る)。
+ALIVE_TARGET = 5        # 365日以内に接触のある人数(暫定・実測2ヶ月後に見直す)
+CONTACT_MONTHLY = 1     # 用事のない連絡 月1件。年12件で5人を回せる計算
+WARN_DAYS = 300         # これを超えたら要連絡
+BREAK_DAYS = 365        # これを超えたら途切れ扱い
 
 
 def linked_header(title: str, url: str) -> str:
@@ -183,6 +193,57 @@ def load_wantlist() -> list:
         st.session_state["_want_err"] = str(e)
         return []
     return out
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_people() -> list:
+    """🤝 人物DB を全件取得(5分キャッシュ)。load_wantlist と同じ方式。"""
+    url = f"https://api.notion.com/v1/data_sources/{PEOPLE_DS_ID}/query"
+    headers = {"Authorization": f"Bearer {TOKEN}",
+               "Notion-Version": "2025-09-03",
+               "Content-Type": "application/json"}
+    out, cursor = [], None
+    try:
+        while True:
+            body = {"page_size": 100}
+            if cursor:
+                body["start_cursor"] = cursor
+            r = requests.post(url, headers=headers, json=body, timeout=30)
+            r.raise_for_status()
+            j = r.json()
+            out.extend(j.get("results", []))
+            if not j.get("has_more"):
+                break
+            cursor = j.get("next_cursor")
+    except Exception as e:  # DB未共有・権限なしでも画面を壊さない
+        st.session_state["_people_err"] = str(e)
+        return []
+    return out
+
+
+def people_frame(today_: dt.date) -> pd.DataFrame:
+    """人物DBを DataFrame 化し、経過日数と状態を付ける。"""
+    rows = []
+    for p in load_people():
+        d = na.prop_date(p, "最終接触日")
+        d = _to_date(d) if d else None
+        rows.append({
+            "名前": na.prop_title(p, "名前") or "(無題)",
+            "関係": na.prop_select(p, "関係") or "未分類",
+            "手段": na.prop_select(p, "接触手段"),
+            "最終接触日": d,
+            "回数": na.prop_number(p, "接触回数"),
+            "メモ": na.prop_rich_text(p, "メモ") or "",
+            "経過": (today_ - d).days if d else None,
+        })
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df["状態"] = df["経過"].map(
+        lambda x: "未記録" if x is None else
+        ("途切れ" if x > BREAK_DAYS else ("要連絡" if x > WARN_DAYS else "良好"))
+    )
+    return df.sort_values("経過", ascending=False, na_position="first")
 
 
 def longest_streak(dates: set) -> int:
@@ -629,7 +690,7 @@ head_l.markdown(
     f"## 🎯 KPI <span style='font-size:0.9rem;color:#9CA3AF'>{today}{_sync_txt}</span>",
     unsafe_allow_html=True,
 )
-page = head_r.radio("page", ["羅針盤", "今日", "コンディション", "目標", "習慣", "成長"],
+page = head_r.radio("page", ["羅針盤", "今日", "コンディション", "目標", "習慣", "成長", "つながり"],
                     horizontal=True, key="nav", label_visibility="collapsed")
 
 
@@ -2743,9 +2804,108 @@ def render_compass():
                "カードをタップすると詳細ページへ")
 
 
+# ================= つながり(人間関係) =================
+def render_connections():
+    st.markdown(linked_header("🤝 つながり", URL_PEOPLE_DB), unsafe_allow_html=True)
+
+    df = people_frame(today)
+    if df.empty:
+        err = st.session_state.get("_people_err")
+        if err:
+            st.warning(f"人物DBを取得できませんでした。インテグレーションへの接続を確認してください。\n\n{err}")
+        else:
+            st.info("まだ人物が登録されていません。Notionの「🤝 人物」DBに5〜10人追加すると指標が動き始めます。")
+        return
+
+    alive = int((df["経過"].notna() & (df["経過"] <= BREAK_DAYS)).sum())
+    warn = df[df["状態"] == "要連絡"]
+    gone = df[df["状態"] == "途切れ"]
+    ym = today.strftime("%Y-%m")
+    monthly = int(sum(1 for d in df["最終接触日"] if d and d.strftime("%Y-%m") == ym))
+
+    # ---- 主指標(ストック) ----
+    c1, c2, c3 = st.columns([1, 1, 2])
+    for col, label, val, tgt, note in (
+        (c1, "生存関係数", alive, ALIVE_TARGET, f"{BREAK_DAYS}日以内に接触"),
+        (c2, "今月の接触", monthly, CONTACT_MONTHLY, "用事がなくてもOK"),
+    ):
+        ok = val >= tgt
+        col.markdown(
+            f"<div style='padding:0.7rem 1rem;border-radius:12px;background:#161B22;"
+            f"border:1px solid #30363D'>"
+            f"<div style='color:#9CA3AF;font-size:0.85rem'>{label}</div>"
+            f"<div style='font-size:2rem;font-weight:700;"
+            f"color:{'#22C55E' if ok else '#EAB308'}'>{val}<span style='font-size:1rem;"
+            f"color:#6B7280'> / {tgt}</span></div>"
+            f"<div style='color:#6B7280;font-size:0.75rem'>{note}</div></div>",
+            unsafe_allow_html=True)
+
+    # ---- 今週の一手(名指しで1人だけ出す) ----
+    with c3:
+        if not warn.empty:
+            t = warn.iloc[0]
+            memo = f"<div style='color:#9CA3AF;font-size:0.85rem;margin-top:0.3rem'>💬 {t['メモ']}</div>" if t["メモ"] else ""
+            st.markdown(
+                f"<div style='padding:0.7rem 1rem;border-radius:12px;background:#161B22;"
+                f"border:1px solid #EAB308;height:100%'>"
+                f"<div style='color:#EAB308;font-size:0.85rem'>今週の一手</div>"
+                f"<div style='font-size:1.3rem;font-weight:700'>{t['名前']} に連絡する</div>"
+                f"<div style='color:#9CA3AF;margin-top:0.2rem'>最終接触から {int(t['経過'])}日 ・ "
+                f"あと {BREAK_DAYS - int(t['経過'])}日で1年</div>{memo}</div>",
+                unsafe_allow_html=True)
+        else:
+            st.markdown(
+                f"<div style='padding:0.7rem 1rem;border-radius:12px;background:#161B22;"
+                f"border:1px solid #30363D;height:100%'>"
+                f"<div style='color:#9CA3AF;font-size:0.85rem'>今週の一手</div>"
+                f"<div style='font-size:1.3rem;font-weight:700'>✅ 急ぎの相手はいません</div>"
+                f"<div style='color:#6B7280;margin-top:0.2rem'>"
+                f"{WARN_DAYS}日を超えた相手が出たらここに名前が出ます</div></div>",
+                unsafe_allow_html=True)
+
+    st.markdown("")
+
+    # ---- 経過日数(全員) ----
+    plot = df[df["経過"].notna()].sort_values("経過")
+    if not plot.empty:
+        colors = ["#EF4444" if v > BREAK_DAYS else ("#EAB308" if v > WARN_DAYS else "#22C55E")
+                  for v in plot["経過"]]
+        fig = go.Figure(go.Bar(x=plot["経過"], y=plot["名前"], orientation="h",
+                               marker_color=colors, hovertemplate="%{y}: %{x}日<extra></extra>"))
+        for xv, cl in ((WARN_DAYS, "#EAB308"), (BREAK_DAYS, "#EF4444")):
+            fig.add_vline(x=xv, line_dash="dot", line_color=cl, opacity=0.6)
+        fig.update_layout(height=max(220, 30 * len(plot) + 80),
+                          margin=dict(l=0, r=10, t=10, b=10),
+                          paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                          font_color="#D1D5DB", xaxis_title="最終接触からの日数",
+                          xaxis=dict(gridcolor="#30363D"), yaxis=dict(gridcolor="#30363D"))
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption(f"点線: {WARN_DAYS}日で要連絡 / {BREAK_DAYS}日で途切れ")
+
+    # ---- 途切れは復帰の機会として ----
+    if not gone.empty:
+        with st.expander(f"しばらく連絡していない相手({len(gone)}人)"):
+            st.caption("途切れは失点ではありません。1通送れば、その日から生存関係に戻ります。")
+            for _, r in gone.iterrows():
+                st.write(f"- {r['名前']}({r['関係']} / {int(r['経過'])}日)")
+
+    # ---- 関係別 ----
+    bd = df.groupby("関係").agg(
+        人数=("名前", "count"),
+        生存=("経過", lambda s: int(sum(1 for v in s if v is not None and v <= BREAK_DAYS))),
+    ).reset_index()
+    left, right = st.columns([1, 2])
+    left.markdown("**関係別**")
+    left.dataframe(bd, use_container_width=True, hide_index=True)
+    with right:
+        with st.expander("全件を見る"):
+            st.dataframe(df[["名前", "関係", "状態", "最終接触日", "経過", "回数", "メモ"]],
+                         use_container_width=True, hide_index=True)
+
+
 PAGES = {"今日": render_today, "コンディション": render_condition,
          "目標": render_goals, "習慣": render_habits, "成長": render_growth,
-         "羅針盤": render_compass}
+         "羅針盤": render_compass, "つながり": render_connections}
 PAGES[page]()
 
 _sync_all = alltime.get("_synced_at")
