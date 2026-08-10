@@ -23,7 +23,11 @@ import requests
 import streamlit as st
 
 API_URL = "https://api.anthropic.com/v1/messages"
-MODEL = "claude-sonnet-5"
+# 使うモデルはここ1行で切り替えられる(2026/8時点の現行世代)。
+#   claude-opus-5    $5/$25  … 既定。判断の機微(維持枠を追い込まない等)が要るタスク向き
+#   claude-sonnet-5  $2/$10  … 十分実用。コストを抑えたいならこちら
+#   claude-haiku-4-5-20251001 $1/$5 … 最安。ニュアンスは落ちる
+MODEL = "claude-opus-5"
 TIMEOUT = 30
 
 NOTION_BASE = "https://api.notion.com/v1"
