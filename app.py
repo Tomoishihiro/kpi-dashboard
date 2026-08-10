@@ -903,9 +903,21 @@ def build_digest(mode: str, sig: tuple, cands: list[str],
 
 
 def render_coach(mode: str, sig: tuple):
-    key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    try:
+        key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    except Exception:
+        key = ""
     if not key:
-        return  # 未設定なら黙って何も出さない
+        # 黙って消えると切り分けができないので、原因が分かる形で出す
+        try:
+            names = ", ".join(sorted(st.secrets.keys())) or "(空)"
+        except Exception:
+            names = "(secretsを読めない)"
+        st.info("🤖 AIコーチ: ANTHROPIC_API_KEY が未設定です。\n\n"
+                "Manage app → ⋮ → Settings → Secrets に\n"
+                "`ANTHROPIC_API_KEY = \"sk-ant-...\"` を追記してください。\n\n"
+                f"現在Secretsに入っているキー名: {names}")
+        return
 
     since = (today - dt.timedelta(days=30)).isoformat()
     history = coach.fetch_history(TOKEN, since)
@@ -934,6 +946,10 @@ def render_coach(mode: str, sig: tuple):
 
     focus = str(a.get("focus", "")).strip()
     if not focus:
+        st.caption("🤖 AIコーチ: 応答は返りましたが focus が空でした")
+        if st.button("再試行", key="coach_empty_retry"):
+            st.session_state["_coach_nonce"] = nonce + 1
+            st.rerun()
         return
     st.markdown(
         f"<div style='padding:1rem 1.2rem;border-radius:14px;margin-top:0.5rem;"
