@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 
 import requests
 import streamlit as st
@@ -255,19 +256,70 @@ def get_advice(day_key: str, nonce: int, _digest: str, _api_key: str) -> dict:
             headers={"x-api-key": _api_key,
                      "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
-            json={"model": MODEL, "max_tokens": 600, "system": SYSTEM,
+            json={"model": MODEL,
+                  # max_tokens は「思考+回答」の合計上限。Opus 5 は思考が既定でONなので、
+                  # 小さいと思考で枠を使い切りJSONが出る前に切れる(=parseエラー)。
+                  # 公式の推奨は「思考は切らず effort で絞る」。思考を切ると
+                  # 内部XMLタグが可視出力に混ざることがあり、JSON崩れの原因になる。
+                  "max_tokens": 4000,
+                  "output_config": {"effort": "low"},
+                  "system": SYSTEM,
                   "messages": [{"role": "user", "content": _digest}]},
             timeout=TIMEOUT)
         res.raise_for_status()
-        text = "".join(b.get("text", "") for b in res.json().get("content", [])
+        body = res.json()
+        text = "".join(b.get("text", "") for b in body.get("content", [])
                        if b.get("type") == "text").strip()
+        stop = body.get("stop_reason")
         start, end = text.find("{"), text.rfind("}")
         if start < 0 or end < 0:
-            return _fallback("parse")
-        out = json.loads(text[start:end + 1])
-        return out if isinstance(out, dict) else _fallback("parse")
+            if stop == "max_tokens":
+                # 思考で枠を使い切った。max_tokensを上げるかeffortを下げる。
+                return _fallback("truncated:max_tokens不足")
+            return _fallback(f"parse:波括弧なし/{len(text)}字/stop={stop}")
+        try:
+            out = json.loads(text[start:end + 1])
+        except json.JSONDecodeError as e:
+            # 切り詰められた場合に備えて、キーだけでも拾えるか試す
+            got = {}
+            for k in ("focus", "why", "praise", "watch", "metric"):
+                m = re.search(rf'"{k}"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+                if m:
+                    got[k] = m.group(1)
+            if got.get("focus"):
+                return got
+            return _fallback(f"parse:{e.msg}/{len(text)}字")
+        return out if isinstance(out, dict) else _fallback("parse:dictでない")
     except requests.HTTPError as e:
         code = e.response.status_code if e.response is not None else "?"
+        if code == 400:
+            # output_config が原因の可能性 → 付けずに一度だけ再試行
+            try:
+                res = requests.post(
+                    API_URL,
+                    headers={"x-api-key": _api_key,
+                             "anthropic-version": "2023-06-01",
+                             "content-type": "application/json"},
+                    json={"model": MODEL, "max_tokens": 4000, "system": SYSTEM,
+                          "messages": [{"role": "user", "content": _digest}]},
+                    timeout=TIMEOUT)
+                res.raise_for_status()
+                t = "".join(b.get("text", "") for b in res.json().get("content", [])
+                            if b.get("type") == "text").strip()
+                a, b2 = t.find("{"), t.rfind("}")
+                if a >= 0 and b2 >= 0:
+                    out = json.loads(t[a:b2 + 1])
+                    if isinstance(out, dict):
+                        return out
+            except Exception:
+                pass
+            detail = ""
+            try:
+                detail = (e.response.json().get("error", {})
+                          .get("message", ""))[:120]
+            except Exception:
+                pass
+            return _fallback(f"http_400:{detail}")
         return _fallback(f"http_{code}")
     except Exception:
         return _fallback("error")
