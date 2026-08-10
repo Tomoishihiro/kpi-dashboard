@@ -19,6 +19,7 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
+import coach
 import notion_api as na
 
 st.set_page_config(page_title="KPI Dashboard", page_icon="🎯", layout="wide")
@@ -35,7 +36,10 @@ JST = dt.timezone(dt.timedelta(hours=9))
 SIGNAL_COLOR = {"青": "#3B82F6", "緑": "#22C55E", "黄": "#EAB308",
                 "橙": "#F97316", "赤": "#EF4444", None: "#6B7280"}
 
-GOAL_KM = 150.0            # 年間目標(2026/8に100km達成 → 150kmへ再設定)
+# 目標ノート(2026/8更新)に合わせる。ランと筋トレは「維持枠」= 壊さない・伸ばさない。
+GOAL_KM = 150.0            # 年間150kmは達成目標ではなく「下限(防衛線)」
+MONTHLY_KM = 25.0          # 維持の実務ライン: 月25km(週2回・1回3〜4km)
+GYM_PER_WEEK = 2           # 筋トレ 週2回(2026/8に週1から変更)
 MILESTONE_KM = 100.0       # 達成済みマイルストーン(グラフに残す)
 STRETCH_KM = 200.0         # 年間ストレッチ目標
 # 英語は「時間」ではなく「スピーキング回数」を主指標にする。
@@ -315,14 +319,27 @@ def week_start_of(d: dt.date) -> dt.date:
     return d - dt.timedelta(days=d.weekday())
 
 
-def weekly_streak(dates: set, today: dt.date) -> int:
-    """週1習慣の連続週数。今週未実施なら先週から遡って数える。"""
-    weeks = {week_start_of(d) for d in dates}
+def week_counts(dates) -> dict:
+    """週の月曜日 -> その週の実施回数。"""
+    out: dict = {}
+    for d in dates:
+        w = week_start_of(d)
+        out[w] = out.get(w, 0) + 1
+    return out
+
+
+def weekly_streak(dates, today: dt.date, min_count: int = 1) -> int:
+    """週次習慣の連続週数。min_count 回以上でその週を「達成」とみなす。
+
+    今週がまだ未達なら、今週は数えずに先週から遡る(週の途中で
+    ストリークが0に見えて心理的に折れるのを避けるため)。
+    """
+    wc = week_counts(dates)
     cur = week_start_of(today)
-    if cur not in weeks:
+    if wc.get(cur, 0) < min_count:
         cur -= dt.timedelta(days=7)
     n = 0
-    while cur in weeks:
+    while wc.get(cur, 0) >= min_count:
         n += 1
         cur -= dt.timedelta(days=7)
     return n
@@ -489,8 +506,10 @@ if not strength.empty:
         else:
             strength[c] = pd.NA
 strength_dates = set(strength["date"]) if not strength.empty else set()
-gym_weeks = weekly_streak(strength_dates, today)
-gym_this_week = week_start_of(today) in {week_start_of(d) for d in strength_dates}
+gym_weeks = weekly_streak(strength_dates, today, GYM_PER_WEEK)
+# 筋トレは「1レコード=1セッション」。同じ日に2回やることは無い前提で日付を数える。
+gym_week_cnt = week_counts(strength_dates).get(week_start_of(today), 0)
+gym_this_week = gym_week_cnt >= GYM_PER_WEEK
 
 # 橙・赤の日は体感が重く出るので判定から除外する
 _sig_by_date = ({r["date"]: r["総合"] for _, r in cond.iterrows() if r["総合"]}
@@ -694,6 +713,291 @@ page = head_r.radio("page", ["羅針盤", "今日", "コンディション", "�
                     horizontal=True, key="nav", label_visibility="collapsed")
 
 
+# ================= AIコーチ =================
+def build_candidates() -> list[str]:
+    """今日の候補をPython側で機械的に検出する(優先度の高い順)。
+
+    LLMは数値の羅列から異常を見つけるのが苦手なので、検知はここで行い、
+    AIには「候補から1つ選んで言語化する」ことだけを任せる。
+    """
+    # (優先度, 文言) 小さいほど優先。
+    # 目標ノートの思想に合わせ、枠で重みを変える:
+    #   1 = 安全(故障・健康を損なう) … 常に最優先
+    #   2 = 伸ばす枠(英語・人間関係)の遅れ … 今年ここに集中すると決めた領域
+    #   3 = 途切れ寸前(習慣の連続が切れる)
+    #   4〜5 = 維持枠(ラン・筋トレ・食事・タスク)の未達 … 「壊さない」だけでよく、
+    #          未達で追い込まない(ハードルは意図的に低く、の設計に従う)
+    c: list[tuple[int, str]] = []
+
+    # --- 今日で途切れる習慣 ---
+    y = today - dt.timedelta(days=1)
+    for label, ds in (("日次ログ", log_dates), ("瞑想", med_dates),
+                      ("ストレッチ", stretch_dates)):
+        if today in ds:
+            continue
+        n = streak_from(ds, y)
+        if n >= 3:
+            c.append((3, f"[途切れ寸前] {label}が{n}日連続中だが今日はまだ未記録。"
+                         f"今日やらないとストリークが切れる"))
+
+    # --- 筋トレ(維持枠) ---
+    if not gym_this_week:
+        left = 6 - today.weekday()
+        short_g = GYM_PER_WEEK - gym_week_cnt
+        pri = 4 if left <= 1 else 5
+        c.append((pri, f"[維持枠] 筋トレ {gym_week_cnt}/{GYM_PER_WEEK}回"
+                       f"(残り{left}日、{gym_weeks}週連続中)。"
+                       f"あと{short_g}回。維持枠なので未達でも追い込まない"))
+
+    # --- 英語(週の残り日数と未達分) ---
+    sp = sum(1 for p in data.get("learning", [])
+             if na.prop_date(p, "日付")
+             and _to_date(na.prop_date(p, "日付")) >= week_start_of(today)
+             and na.prop_select(p, "種別") == "スピーキング")
+    left_d = 7 - today.weekday()
+    short = WEEKLY_SPEAK_CNT - sp
+    if short > 0:
+        if short > left_d:
+            c.append((2, f"[伸ばす枠・達成不能] 英語レッスン 残り{short}回だが"
+                         f"週の残りは{left_d}日。今週の完全達成は不可能。"
+                         f"せめて1回は確保する話に切り替える"))
+        else:
+            c.append((2, f"[伸ばす枠] 英語レッスン {sp}/{WEEKLY_SPEAK_CNT}回、"
+                         f"残り{left_d}日。今年の注力領域"))
+
+    # --- ラン(故障予防の上限と目標ペース) ---
+    if not runs.empty:
+        ws = week_start_of(today)
+        wk_km = float(runs[runs["date"] >= ws]["km"].sum())
+        prevs = [float(runs[(runs["date"] >= ws - dt.timedelta(days=7 * i))
+                            & (runs["date"] < ws - dt.timedelta(days=7 * (i - 1)))]
+                       ["km"].sum()) for i in range(1, 5)]
+        chronic = sum(prevs) / 4
+        cap = max(max(prevs[0], chronic) * RUN_CAP_RATIO, RUN_FLOOR_KM)
+        if wk_km > cap:
+            c.append((1, f"[故障リスク] 今週{wk_km:.1f}kmで上限{cap:.1f}kmを超過。"
+                         f"これ以上距離を伸ばさない"))
+        elif wk_km == 0 and today.weekday() >= 4:
+            c.append((5, f"[維持枠] 今週まだ走っていない(残り{6 - today.weekday()}日、"
+                         f"上限{cap:.1f}km)"))
+        m_km = float(runs[runs["date"] >= today.replace(day=1)]["km"].sum())
+        if m_km < MONTHLY_KM * 0.5 and today.day >= 20:
+            c.append((4, f"[維持枠] 今月{m_km:.1f}km / 維持ライン{MONTHLY_KM:.0f}km。"
+                         f"年間{GOAL_KM:.0f}kmは下限(防衛線)であって達成目標ではない"))
+
+    # --- 食事(7日平均で目標から最も外れている1つ) ---
+    if not meals.empty:
+        half = today - dt.timedelta(days=7)
+        worst, worst_gap = None, 0.0
+        for nm, (goal, down) in NUTRI_GOALS.items():
+            if nm not in meals.columns:
+                continue
+            v = meals[meals["date"] > half][nm].dropna()
+            if len(v) < 3:
+                continue
+            gap = (v.mean() - goal) / goal if down else (goal - v.mean()) / goal
+            if gap > worst_gap:
+                worst, worst_gap = (nm, v.mean(), goal, down), gap
+        if worst and worst_gap > 0.10:
+            nm, avg, goal, down = worst
+            c.append((4, f"[維持枠・食事] {nm}の7日平均{avg:.0f}g が目標{goal:.0f}g"
+                         f"{'を超過' if down else 'に未達'}(乖離{worst_gap * 100:.0f}%)。"
+                         f"本人の運用は数値計算ではなく頻度ルール"
+                         f"(揚げ物・加工肉は週2回まで/たんぱく質を毎食1品)"))
+
+    # --- タスク ---
+    r30 = [v for d_, v in task_rate_by_day.items()
+           if d_ > today - dt.timedelta(days=30)]
+    if TW_DONE < LW_DONE_SAME - 5:
+        c.append((4, f"[失速] 今週の完了{TW_DONE}件 vs 先週同時点{LW_DONE_SAME}件"))
+    if r30 and sum(r30) / len(r30) < 0.6:
+        c.append((5, f"[消化率] 直近30日平均{sum(r30) / len(r30) * 100:.0f}% — "
+                     f"タスクを積みすぎている可能性"))
+
+    # --- 思考在庫 ---
+    n_th = len(data.get("thoughts_open", []))
+    if n_th >= 10:
+        c.append((3, f"[在庫超過] 思考記録の未処理が{n_th}件(SOP上10件超で割り込み処理)"))
+
+    # --- 筋トレの段階 ---
+    try:
+        for lc in load_cols:
+            if strength[lc].notna().sum() == 0:
+                continue
+            v, _ = load_verdict(lc)
+            if v == "up":
+                c.append((5, f"[維持枠] 筋トレの{lc[:-len(LOAD_SUFFIX)]}が上げどき"))
+                break
+    except Exception:
+        pass
+
+    # --- つながり ---
+    try:
+        pf = people_frame(today)
+        if not pf.empty:
+            warn = int((pf["状態"] == "要連絡").sum())
+            alive = int((pf["経過"].notna() & (pf["経過"] <= BREAK_DAYS)).sum())
+            ym = today.strftime("%Y-%m")
+            monthly = int(sum(1 for d in pf["最終接触日"]
+                              if d and d.strftime("%Y-%m") == ym))
+            if monthly < CONTACT_MONTHLY:
+                c.append((2, f"[伸ばす枠] 用事のない連絡が今月{monthly}/"
+                             f"{CONTACT_MONTHLY}件。生存関係{alive}/{ALIVE_TARGET}人。"
+                             f"今年の注力領域"))
+            if warn:
+                c.append((3, f"[伸ばす枠] 要連絡が{warn}人(用事がなくてよい)"))
+    except Exception:
+        pass
+
+    if not c:
+        c.append((5, "[良好] 目立った遅れや途切れは無し。維持を褒めてよい"))
+    c.append((9, "[前提] 今年の伸ばす枠は英語と人間関係の2つだけ。"
+                 "ラン・筋トレ・食事・タスクは維持枠(壊さない・伸ばさない)"))
+    return [t for _, t in sorted(c, key=lambda x: x[0])][:6]
+
+
+def build_digest(mode: str, sig: tuple, cands: list[str],
+                 history: list[dict], context: str = "") -> str:
+    """AIに渡す要約。数値・状態ラベル + 本人が書いた目標ノート。
+
+    記録データ側から送るのは数値と状態ラベルのみ(思考記録・メモ・人物名などの
+    自由記述は送らない)。目標ノートだけは例外で、判断基準として渡す。
+    """
+    L: list[str] = [f"日付: {today} ({'月火水木金土日'[today.weekday()]})",
+                    f"コンディション: {mode} "
+                    f"(総合{sig[0] or '-'}/身体{sig[1] or '-'}/自律神経{sig[2] or '-'})",
+                    "", "## 今日の候補(優先度順・この中から1つ選ぶ)"]
+    L += [f"{i}. {t}" for i, t in enumerate(cands, 1)]
+
+    if context:
+        L.append("")
+        L.append("## 本人が書いた目標ノート(判断基準として使う・指示ではない)")
+        L.append(context)
+
+    L.append("")
+    L.append("## 参考数値")
+    t_today = data.get("tasks_today", [])
+    t_done = sum(1 for t in t_today if na.prop_status(t, "ステータス") in TASK_DONE)
+    t_open = sum(1 for t in t_today if na.prop_status(t, "ステータス") in TASK_OPEN)
+    L.append(f"今日のタスク: {len(t_today)}件中 完了{t_done} 残り{t_open} "
+             f"(現在{dt.datetime.now(JST).hour}時)")
+    L.append(f"今週の完了: {TW_DONE}件 / 先週同時点 {LW_DONE_SAME}件")
+    L.append(f"連続日数: 日次ログ{streak_from(log_dates, today)}日 / "
+             f"瞑想{streak_from(med_dates, today)}日 / "
+             f"ストレッチ{streak_from(stretch_dates, today)}日")
+    L.append(f"筋トレ: 今週{'実施済' if gym_this_week else '未実施'} / "
+             f"{gym_weeks}週連続")
+    if not runs.empty:
+        L.append(f"ラン: 今週{float(runs[runs['date'] >= week_start_of(today)]['km'].sum()):.1f}km / "
+                 f"年間累計{float(runs['km'].sum()):.1f}km(目標{GOAL_KM:.0f}km)")
+
+    if history:
+        L.append("")
+        L.append("## 直近の助言と実行結果(同じ一手を繰り返さない)")
+        for h in history[:5]:
+            L.append(f"{h['date']}: 「{h['focus']}」→ {h['done'] or '未回答'}")
+        undone = [h for h in history[:5] if h["done"] == "やらなかった"]
+        if len(undone) >= 2:
+            L.append("※ 実行されない一手が続いている。もっと小さく分解すること")
+    return "\n".join(L)
+
+
+def render_coach(mode: str, sig: tuple):
+    key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    if not key:
+        return  # 未設定なら黙って何も出さない
+
+    since = (today - dt.timedelta(days=30)).isoformat()
+    history = coach.fetch_history(TOKEN, since)
+    todays = next((h for h in history if h["date"] == today.isoformat()), None)
+
+    nonce = st.session_state.get("_coach_nonce", 0)
+    if todays and nonce == 0:
+        a, page_id = todays, todays["id"]  # 保存済みを再利用(API呼び出しなし)
+    else:
+        cands = build_candidates()
+        ctx = coach.fetch_context(TOKEN, str(today))
+        with st.spinner("今日の一手を考えています…"):
+            a = coach.get_advice(f"{today}-{nonce}", nonce,
+                                 build_digest(mode, sig, cands, history, ctx), key)
+        page_id = None
+        if "_error" not in a:
+            page_id = coach.save_advice(TOKEN, today, mode, a, " / ".join(cands))
+            coach.fetch_history.clear()
+
+    if "_error" in a:
+        st.caption(f"🤖 AIコーチは今日お休みです ({a['_error']})")
+        if st.button("再試行", key="coach_retry"):
+            st.session_state["_coach_nonce"] = nonce + 1
+            st.rerun()
+        return
+
+    focus = str(a.get("focus", "")).strip()
+    if not focus:
+        return
+    st.markdown(
+        f"<div style='padding:1rem 1.2rem;border-radius:14px;margin-top:0.5rem;"
+        f"background:linear-gradient(135deg,#22C55E18,#3B82F612);"
+        f"border:1px solid #22C55E66'>"
+        f"<div style='color:#22C55E;font-size:0.72rem;font-weight:700'>"
+        f"🤖 今日の一手</div>"
+        f"<div style='font-size:1.25rem;font-weight:700;margin-top:0.2rem'>"
+        f"{focus}</div>"
+        f"<div style='color:#9CA3AF;font-size:0.85rem;margin-top:0.25rem'>"
+        f"{a.get('why', '')}</div></div>",
+        unsafe_allow_html=True)
+
+    cc = st.columns(3)
+    for col, icon, label, val, color in (
+            (cc[0], "👏", "効いていること", a.get("praise"), "#22C55E"),
+            (cc[1], "👀", "気をつけること", a.get("watch"), "#EAB308"),
+            (cc[2], "🎯", "今日見る指標", a.get("metric"), "#3B82F6")):
+        if not val:
+            continue
+        col.markdown(
+            f"<div style='padding:0.6rem 0.8rem;border-radius:10px;"
+            f"background:#161B22;border-left:3px solid {color};height:100%'>"
+            f"<div style='color:{color};font-size:0.68rem;font-weight:700'>"
+            f"{icon} {label}</div>"
+            f"<div style='font-size:0.9rem;margin-top:0.15rem'>{val}</div></div>",
+            unsafe_allow_html=True)
+
+    # ---- 実行フィードバック(1タップ) ----
+    b1, b2, b3, b4 = st.columns([1, 1, 1, 1.6])
+    cur = (todays or {}).get("done")
+    if page_id and not cur:
+        if b1.button("✅ やった", key="coach_done", use_container_width=True):
+            coach.mark_done(TOKEN, page_id, "やった")
+            coach.fetch_history.clear()
+            st.rerun()
+        if b2.button("⏭️ やらなかった", key="coach_skip", use_container_width=True):
+            coach.mark_done(TOKEN, page_id, "やらなかった")
+            coach.fetch_history.clear()
+            st.rerun()
+    elif cur:
+        b1.markdown(f"<div style='padding:0.4rem'>記録済: "
+                    f"<b>{'✅ やった' if cur == 'やった' else '⏭️ やらなかった'}</b></div>",
+                    unsafe_allow_html=True)
+
+    if b3.button("🔄 別の一手", key="coach_refresh", use_container_width=True):
+        st.session_state["_coach_nonce"] = nonce + 1
+        st.rerun()
+
+    answered = [h for h in history if h["done"]]
+    if len(answered) >= 3:
+        rate = sum(1 for h in answered if h["done"] == "やった") / len(answered)
+        b4.markdown(
+            f"<div style='padding:0.4rem;color:#9CA3AF;font-size:0.8rem'>"
+            f"一手の実行率 <b style='color:"
+            f"{'#22C55E' if rate >= 0.5 else '#EAB308'}'>{rate * 100:.0f}%</b>"
+            f" ({len(answered)}件) ・ <a href='{coach.URL_COACH_DB}' "
+            f"target='_blank' style='color:#6B7280'>履歴</a></div>",
+            unsafe_allow_html=True)
+        if rate < 0.35:
+            st.caption("⚠️ 実行率が低い。一手が重すぎるか的外れの可能性 — "
+                       "coach.py の SYSTEM を調整するサイン")
+
+
 # ================= 今日(壁掛けビュー) =================
 def render_today():
     latest = cond.iloc[-1] if not cond.empty else None
@@ -717,6 +1021,8 @@ def render_today():
     )
     if is_today and latest["フィードバック"]:
         st.caption(f"💬 {latest['フィードバック']}")
+
+    render_coach(mode, sig)
 
     # ---- 今日の免責(悪い日にだけ現れる) ----
     now_hour = dt.datetime.now(JST).hour
@@ -770,7 +1076,8 @@ def render_today():
          streak_from(stretch_dates, today), True),
         ("🎧", "学習", today in learn_dates, URL_LEARNING_DB, None, False),
         ("🏃", "ラン", run_today, URL_RUN_DB, None, False),
-        ("💪", "筋トレ", gym_this_week, URL_STRENGTH_DB, gym_weeks, False),
+        (f"💪", f"筋トレ {gym_week_cnt}/{GYM_PER_WEEK}", gym_this_week,
+         URL_STRENGTH_DB, gym_weeks, False),
     ]
     core_done = sum(1 for _, _, done, *_ in tiles if done and _)
     core_total = sum(1 for t in tiles if t[5])
@@ -1445,8 +1752,10 @@ def render_goals():
                 months.append(cur_m)
                 cur_m = (cur_m.replace(day=28) + dt.timedelta(days=4)).replace(day=1)
             n_months = len(months)
-            pace_km = GOAL_KM / n_months          # 目標達成に必要な月あたり距離
-            stretch_pace = STRETCH_KM / n_months
+            # 目標ノートに合わせ、実務ラインは月25km。
+            # 年間下限150kmを12で割った12.5kmは「これを切ると年間下限を割る」線。
+            pace_km = MONTHLY_KM
+            floor_pace = GOAL_KM / n_months
 
             labels = [f"{m.month}月" for m in months]
             mvals = [km_by_month.get(m.strftime("%Y-%m"), 0.0) for m in months]
@@ -1455,16 +1764,17 @@ def render_goals():
             for m, v in zip(months, mvals):
                 if m > this_m:
                     mcolors.append("#21262D")          # 未来の月
-                elif v >= stretch_pace:
-                    mcolors.append("#EAB308")          # ストレッチ達成
                 elif v >= pace_km:
-                    mcolors.append("#22C55E")          # 目標ペース達成
+                    mcolors.append("#22C55E")          # 維持ライン達成
                 else:
-                    mcolors.append("#3B82F6")          # ペース未達
+                    # 維持枠なので未達を赤で咎めない(青=記録あり/実績)
+                    mcolors.append("#3B82F6")
 
             g1, g2 = st.columns([1, 1.2])
             with g1:
-                st.caption(f"月別距離 (km) — 破線が目標ペース {pace_km:.1f}km/月")
+                st.caption(f"月別距離 (km) — 破線が維持ライン {pace_km:.0f}km/月 ・ "
+                           f"細点線が年間下限{GOAL_KM:.0f}kmの割り込み線 "
+                           f"{floor_pace:.1f}km/月")
                 mfig = go.Figure()
                 mfig.add_trace(go.Bar(
                     x=labels, y=mvals, marker_color=mcolors,
@@ -1473,8 +1783,8 @@ def render_goals():
                     hovertemplate="%{x} %{y:.1f} km<extra></extra>"))
                 mfig.add_hline(y=pace_km, line=dict(color="#6B7280", width=1,
                                                     dash="dash"))
-                mfig.add_hline(y=stretch_pace, line=dict(color="#EAB308", width=1,
-                                                         dash="dot"))
+                mfig.add_hline(y=floor_pace, line=dict(color="#EF4444", width=1,
+                                                       dash="dot"))
                 mfig.update_layout(height=240, margin=dict(l=10, r=10, t=20, b=10),
                                    showlegend=False)
                 mfig.update_xaxes(type="category")
@@ -1484,7 +1794,7 @@ def render_goals():
                 if done_m:
                     hit = sum(1 for v in done_m if v >= pace_km)
                     cur_month_km = km_by_month.get(today.strftime("%Y-%m"), 0.0)
-                    st.caption(f"🟢目標ペース達成 {hit}/{len(done_m)}ヶ月 ・ "
+                    st.caption(f"🟢維持ライン達成 {hit}/{len(done_m)}ヶ月 ・ "
                                f"今月 {cur_month_km:.1f}km ・ "
                                f"月平均 {sum(done_m) / len(done_m):.1f}km")
             with g2:
@@ -1621,7 +1931,7 @@ def render_goals():
                 "入力は体感負荷(1〜5)だけです。")
         else:
             m = st.columns(4)
-            m[0].metric("今週", "実施済 ✓" if gym_this_week else "未実施",
+            m[0].metric("今週", f"{gym_week_cnt} / {GYM_PER_WEEK} 回",
                         f"🔥 {gym_weeks} 週連続" if gym_weeks else None,
                         delta_color="off")
             m[1].metric("通算セッション", f"{len(strength)} 回")
