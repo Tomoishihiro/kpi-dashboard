@@ -115,6 +115,28 @@ PEOPLE_DS_ID = "81c2ff03-e967-46e2-a6b5-3f174d34ec8a"  # 人物 data source
 # 途切れは失点ではなく復帰の機会として扱う(悪い日にシステムが免責する側に回る)。
 ALIVE_TARGET = 5        # 365日以内に接触のある人数(暫定・実測2ヶ月後に見直す)
 CONTACT_MONTHLY = 1     # 用事のない連絡 月1件。年12件で5人を回せる計算
+
+# ==== 目標フレーム(3層) ====
+# ノートの「結論」だけをここに写す。数値の実績はDB/ダッシュボードが正本。
+URL_LONG_NOTE = "https://app.notion.com/p/3b66e5b9ef10818c84c0f750db7b4c5a"
+URL_YEAR_NOTE = "https://app.notion.com/p/37e6e5b9ef10819bb080e2629f5c37fa"
+URL_QUARTER_NOTE = "https://app.notion.com/p/3b86e5b9ef108130b772d0d5aa19a692"
+
+GOAL_FRAME = [
+    ("長期(5年)", "健康を土台に、人とのつながりと表現を増やす",
+     URL_LONG_NOTE, "#A78BFA"),
+    ("年次(2026)", "伸ばすのは英語と人間関係の2つだけ。他は維持",
+     URL_YEAR_NOTE, "#3B82F6"),
+    ("四半期(Q3 8〜9月)", "伸ばす枠を週次で回る形にする。新しいことは足さない",
+     URL_QUARTER_NOTE, "#22C55E"),
+]
+
+# 期限つきタスク(習慣ではないもの。週次レビューには載せない)
+DEADLINES = [
+    (dt.date(2026, 9, 30), "ねんきんネットで年金見込み確認"),
+    (dt.date(2026, 9, 30), "iDeCo増額(勤務先にDB掛金相当額を確認)"),
+    (dt.date(2026, 11, 30), "矯正をやるか決める(判断デッドライン)"),
+]
 WARN_DAYS = 300         # これを超えたら要連絡
 BREAK_DAYS = 365        # これを超えたら途切れ扱い
 
@@ -714,6 +736,127 @@ page = head_r.radio("page", ["羅針盤", "今日", "コンディション", "�
 
 
 # ================= AIコーチ =================
+def keep_frame_status() -> list[tuple]:
+    """維持枠の現況を返す -> [(絵文字, 名前, 現在値, 基準, ok?), ...]
+
+    「壊れていないか」だけを見る。未達を赤で咎めない(維持枠の設計思想)。
+    """
+    out = []
+    m_km = (float(runs[runs["date"] >= today.replace(day=1)]["km"].sum())
+            if not runs.empty else 0.0)
+    out.append(("🏃", "ラン", f"今月 {m_km:.1f}km", f"{MONTHLY_KM:.0f}km",
+                m_km >= MONTHLY_KM))
+    out.append(("💪", "筋トレ", f"今週 {gym_week_cnt}回",
+                f"{GYM_PER_WEEK}回", gym_week_cnt >= GYM_PER_WEEK))
+    if not meals.empty:
+        half = today - dt.timedelta(days=7)
+        v = meals[meals["date"] > half].get("飽和脂肪酸")
+        v = v.dropna() if v is not None else None
+        if v is not None and len(v):
+            goal = NUTRI_GOALS["飽和脂肪酸"][0]
+            out.append(("🥗", "飽和脂肪酸", f"7日平均 {v.mean():.0f}g",
+                        f"{goal:.0f}g", v.mean() <= goal))
+        p = meals[meals["date"] > half].get("タンパク質")
+        p = p.dropna() if p is not None else None
+        if p is not None and len(p):
+            goal = NUTRI_GOALS["タンパク質"][0]
+            out.append(("🍗", "たんぱく質", f"7日平均 {p.mean():.0f}g",
+                        f"{goal:.0f}g", p.mean() >= goal))
+    return out
+
+
+def grow_frame_status() -> list[tuple]:
+    """伸ばす枠(英語・人間関係)の現況。ここは達成を目指す枠。"""
+    out = []
+    sp = sum(1 for p in data.get("learning", [])
+             if na.prop_date(p, "日付")
+             and _to_date(na.prop_date(p, "日付")) >= week_start_of(today)
+             and na.prop_select(p, "種別") == "スピーキング")
+    out.append(("🇬🇧", "英語レッスン", f"今週 {sp}回", f"{WEEKLY_SPEAK_CNT}回",
+                sp >= WEEKLY_SPEAK_CNT, 7 - today.weekday()))
+    try:
+        pf = people_frame(today)
+        ym = today.strftime("%Y-%m")
+        n = int(sum(1 for d in pf["最終接触日"]
+                    if d and d.strftime("%Y-%m") == ym)) if not pf.empty else 0
+    except Exception:
+        n = 0
+    days_left = ((today.replace(day=28) + dt.timedelta(days=4)).replace(day=1)
+                 - today).days
+    out.append(("🤝", "用事のない連絡", f"今月 {n}件", f"{CONTACT_MONTHLY}件",
+                n >= CONTACT_MONTHLY, days_left))
+    return out
+
+
+def render_goal_frame(compact: bool = False):
+    """大目標フレーム + 伸ばす枠/維持枠 + 期限つきタスク。"""
+    if not compact:
+        st.markdown("#### 🎯 いま追っているもの")
+        for label, line, url, color in GOAL_FRAME:
+            st.markdown(
+                f"<a href='{url}' target='_blank' style='text-decoration:none'>"
+                f"<div style='padding:0.5rem 0.8rem;margin-bottom:4px;"
+                f"border-left:3px solid {color};background:#161B2288;"
+                f"border-radius:6px'>"
+                f"<span style='color:{color};font-size:0.7rem;font-weight:700'>"
+                f"{label}</span><br>"
+                f"<span style='font-size:0.95rem;color:#E6EDF3'>{line}</span>"
+                f"</div></a>", unsafe_allow_html=True)
+
+    # ---- 伸ばす枠 ----
+    st.markdown("###### 🚀 伸ばす枠 — ここだけが伸ばす対象")
+    cols = st.columns(len(grow_frame_status()))
+    for c, (icon, name, cur, goal, ok, left) in zip(cols, grow_frame_status()):
+        color = "#22C55E" if ok else "#EAB308"
+        c.markdown(
+            f"<div style='padding:0.6rem 0.8rem;border-radius:10px;"
+            f"background:#161B22;border:2px solid {color}'>"
+            f"<div style='font-size:0.72rem;color:#9CA3AF'>{icon} {name}</div>"
+            f"<div style='font-size:1.15rem;font-weight:700;color:{color}'>"
+            f"{cur}</div>"
+            f"<div style='font-size:0.68rem;color:#6B7280'>目標 {goal} ・ "
+            f"残り{left}日</div></div>", unsafe_allow_html=True)
+
+    # ---- 維持枠 ----
+    ks = keep_frame_status()
+    st.markdown("###### 🛡 維持枠 — 壊さない・伸ばさない(未達でも追い込まない)")
+    cols = st.columns(len(ks))
+    for c, (icon, name, cur, goal, ok) in zip(cols, ks):
+        color = "#22C55E" if ok else "#6B7280"
+        mark = "✓" if ok else "…"
+        c.markdown(
+            f"<div style='padding:0.5rem 0.7rem;border-radius:10px;"
+            f"background:#161B22;border-left:3px solid {color}'>"
+            f"<div style='font-size:0.7rem;color:#9CA3AF'>{icon} {name}</div>"
+            f"<div style='font-size:1rem;font-weight:700;color:{color}'>"
+            f"{cur} {mark}</div>"
+            f"<div style='font-size:0.66rem;color:#6B7280'>基準 {goal}</div>"
+            f"</div>", unsafe_allow_html=True)
+
+    # ---- 期限つきタスク ----
+    live = [(d, t) for d, t in DEADLINES if (d - today).days >= -7]
+    if live:
+        st.markdown("###### 📅 期限つき — 習慣ではないもの")
+        for d, t in sorted(live):
+            n = (d - today).days
+            if n < 0:
+                color, txt = "#EF4444", f"{-n}日 超過"
+            elif n <= 14:
+                color, txt = "#EF4444", f"あと {n}日"
+            elif n <= 45:
+                color, txt = "#EAB308", f"あと {n}日"
+            else:
+                color, txt = "#6B7280", f"あと {n}日"
+            st.markdown(
+                f"<div style='display:flex;justify-content:space-between;"
+                f"padding:0.35rem 0.7rem;margin-bottom:3px;border-radius:6px;"
+                f"background:#161B2288;border-left:3px solid {color}'>"
+                f"<span style='font-size:0.9rem'>{t}</span>"
+                f"<span style='color:{color};font-size:0.82rem;font-weight:700'>"
+                f"{d.month}/{d.day} ・ {txt}</span></div>",
+                unsafe_allow_html=True)
+
+
 def build_candidates() -> list[str]:
     """今日の候補をPython側で機械的に検出する(優先度の高い順)。
 
@@ -1039,6 +1182,9 @@ def render_today():
         st.caption(f"💬 {latest['フィードバック']}")
 
     render_coach(mode, sig)
+
+    with st.expander("🎯 いま追っているもの(伸ばす枠 / 維持枠 / 期限つき)"):
+        render_goal_frame(compact=True)
 
     # ---- 今日の免責(悪い日にだけ現れる) ----
     now_hour = dt.datetime.now(JST).hour
@@ -3025,6 +3171,9 @@ def render_compass():
             st.cache_data.clear()
             st.rerun()
         return
+    render_goal_frame()
+    st.divider()
+
     rows.sort(key=lambda r: r["order"])
     values = [r for r in rows if r["kind"] == "価値観"]
     questions = [r for r in rows if r["kind"] == "毎日の問い"]
